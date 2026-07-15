@@ -80,9 +80,9 @@ button.sm{padding:5px 9px;font-size:12px}
   padding:12px 14px;display:flex;flex-direction:column;min-height:0}
 #compPanel{flex:1 1 58%}
 #abxPanel{flex:1 1 42%}
-.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px 20px;margin-bottom:8px;flex-wrap:wrap}
 .panel-head h2{margin:0;font-size:13px;font-weight:600;letter-spacing:.2px}
-.head-left{display:flex;align-items:center;gap:14px;min-width:0}
+.head-left{display:flex;align-items:center;gap:14px;min-width:0;flex-wrap:wrap;row-gap:6px}
 .toggle{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink2);cursor:pointer;white-space:nowrap}
 .toggle input{width:auto;margin:0;cursor:pointer}
 .hint{font-weight:400;color:var(--muted);font-size:11.5px}
@@ -187,3 +187,22 @@ text{fill:var(--muted);font-size:10.5px}
 .tooltip .tt-row{display:flex;align-items:center;gap:6px;justify-content:space-between}
 .tooltip .tt-sw{width:9px;height:9px;border-radius:2px;display:inline-block}
 .tooltip b{font-variant-numeric:tabular-nums}
+
+/* ---- responsive: below this width the fixed 320px metrics rail crushes
+   the composition panel down to a sliver, taking the taxUMAP toggle with it ---- */
+@media (max-width:960px){
+  body{overflow-y:auto}
+  #topbar{flex-wrap:wrap;row-gap:8px}
+  .combo input{width:150px}
+  #app{grid-template-columns:1fr;grid-template-rows:auto auto;height:auto;min-height:calc(100vh - 57px)}
+  #stage{overflow:visible}
+  #compPanel{flex:none;height:min(70vh,520px)}
+  #abxPanel{flex:none;height:min(60vh,420px)}
+  #metrics{overflow:visible;padding:0 14px 14px}
+  .legend{max-width:100%;justify-content:flex-start}
+}
+@media (max-width:520px){
+  .start-combo input{width:min(80vw,300px)}
+  .controls{flex-wrap:wrap;justify-content:flex-start;row-gap:8px}
+  #sampleCtl select{max-width:150px}
+}
