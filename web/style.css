@@ -1,0 +1,173 @@
+/* ---- theme tokens (dataviz reference palette, light + dark) ---- */
+.viz-root{
+  color-scheme: dark;
+  --surface-1:#1a1a19; --page:#0d0d0d; --panel:#1f1f1e;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.12);
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --accent:#3987e5; --accent2:#199e70;
+  /* taxa: ORIGINAL pNODE class palette (code/pnode/eval.py _COLORS/_LABELS);
+     same-class genera use lightness variants of their class colour */
+  --tx-entero:#006400; --tx-enterobact:#EE2C2C; --tx-nonferm:#B71C1C;   /* Enterococcus / Gammaproteobacteria */
+  --tx-strep:#8FBC8F; --tx-lacto:#A9CBA9; --tx-staph:#6FA06F;           /* Bacilli_not_enterococcus */
+  --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3; /* Clostridia / Bacteroidia */
+  --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E; /* Verrucomicrobiae / Actinobacteria / Erysipelotrichia */
+  --tx-pathobiont:#AA336A; --tx-other:#808080;                          /* Deltaproteobacteria (misc) / removed_taxa */
+}
+.viz-root[data-theme="light"]{
+  color-scheme: light;
+  --surface-1:#fcfcfb; --page:#f2f1ec; --panel:#ffffff;
+  --ink:#0b0b0b; --ink2:#52514e; --muted:#8a8880;
+  --grid:#e6e5de; --axis:#c9c8c0; --border:rgba(11,11,11,.12);
+  --good:#0ca30c; --warning:#e59500; --serious:#e06636; --critical:#d03b3b;
+  --accent:#2a78d6; --accent2:#1baf7a;
+  /* original pNODE class palette (same fixed hexes as dark; matches the paper figures) */
+  --tx-entero:#006400; --tx-enterobact:#EE2C2C; --tx-nonferm:#B71C1C;
+  --tx-strep:#8FBC8F; --tx-lacto:#A9CBA9; --tx-staph:#6FA06F;
+  --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3;
+  --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E;
+  --tx-pathobiont:#AA336A; --tx-other:#808080;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--page);color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px;overflow:hidden}
+
+/* ---- top bar ---- */
+#topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;
+  padding:10px 18px;background:var(--surface-1);border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{font-size:26px;color:var(--accent);line-height:1}
+.title{font-weight:650;font-size:16px;letter-spacing:.2px}
+.subtitle{font-size:11.5px;color:var(--muted)}
+.controls{display:flex;align-items:flex-end;gap:14px}
+.ctl{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+/* patient-dependent header controls appear only once a patient is picked */
+#patientCtl,#sampleCtl{display:none}
+body.has-patient #patientCtl,body.has-patient #sampleCtl{display:flex}
+select,input,button{font-family:inherit;font-size:13px;color:var(--ink);
+  background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:7px 9px;outline:none}
+select:focus,input:focus{border-color:var(--accent)}
+select:disabled{opacity:.5}
+button{cursor:pointer;text-transform:none;letter-spacing:0}
+button.ghost{background:transparent}
+button.ghost:hover{background:var(--panel);border-color:var(--accent)}
+button.sm{padding:5px 9px;font-size:12px}
+#themeBtn{font-size:16px;padding:6px 10px}
+
+.combo{position:relative}
+.combo input{width:210px}
+.dropdown{position:absolute;top:calc(100% + 4px);left:0;width:290px;max-height:340px;overflow:auto;
+  background:var(--panel);border:1px solid var(--border);border-radius:8px;z-index:40;
+  box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.dropdown.hidden{display:none}
+.p-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 11px;cursor:pointer;border-bottom:1px solid var(--grid)}
+.p-item:hover,.p-item.active{background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.p-item .pid{font-weight:600}
+.p-item .pmeta{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.badge{font-size:9.5px;font-weight:700;padding:2px 5px;border-radius:5px;letter-spacing:.3px}
+.badge.e{background:color-mix(in srgb,var(--critical) 25%,transparent);color:var(--critical)}
+.badge.n{background:color-mix(in srgb,var(--tx-nonferm) 28%,transparent);color:var(--tx-nonferm)}
+
+/* ---- layout ---- */
+#app{display:grid;grid-template-columns:1fr 320px;grid-template-rows:1fr;
+  height:calc(100vh - 57px);position:relative}
+#app.empty #stage,#app.empty #metrics{visibility:hidden}
+#app:not(.empty) #placeholder{display:none}
+#stage{display:flex;flex-direction:column;gap:12px;padding:14px;overflow:hidden;min-width:0}
+.panel{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
+  padding:12px 14px;display:flex;flex-direction:column;min-height:0}
+#compPanel{flex:1 1 58%}
+#abxPanel{flex:1 1 42%}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.panel-head h2{margin:0;font-size:13px;font-weight:600;letter-spacing:.2px}
+.head-left{display:flex;align-items:center;gap:14px;min-width:0}
+.toggle{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink2);cursor:pointer;white-space:nowrap}
+.toggle input{width:auto;margin:0;cursor:pointer}
+.hint{font-weight:400;color:var(--muted);font-size:11.5px}
+.panel-actions{display:flex;gap:9px;align-items:center}
+.barkey{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--muted)}
+.bk{width:16px;height:9px;border-radius:2px;display:inline-block}
+.bk.actual{background:var(--muted);opacity:.55}
+.bk.added{background:var(--accent2);opacity:.85}
+
+.legend{display:flex;flex-wrap:wrap;gap:5px 10px;justify-content:flex-end;max-width:60%}
+.leg{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--ink2);cursor:default}
+.leg .sw{width:10px;height:10px;border-radius:3px}
+
+.chartrow{display:flex;flex:1;min-height:0}
+/* the antibiotic timeline scrolls VERTICALLY to reveal lower treatment lanes;
+   gutter (labels) and bars scroll together (align-items:flex-start so both take
+   their intrinsic tall height) */
+#abxPanel .chartrow{overflow-y:auto;align-items:flex-start}
+.gutter{flex:0 0 132px;position:relative}
+.gutter svg{display:block}
+.scroll{flex:1;overflow-x:auto;overflow-y:hidden;min-width:0}
+.scroll svg{display:block}
+.axis-caption{margin-left:132px;text-align:center;font-size:11px;color:var(--muted);padding-top:3px}
+.scroll::-webkit-scrollbar{height:10px}
+.scroll::-webkit-scrollbar-thumb{background:var(--axis);border-radius:6px}
+
+/* ---- metrics ---- */
+#metrics{padding:14px 14px 14px 0;display:flex;flex-direction:column;gap:12px;overflow:auto}
+.metric-card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:12px 13px}
+.mc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.mc-title{font-size:12px;font-weight:600;color:var(--ink2)}
+.tier{font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.5px}
+.tier.LOW{background:color-mix(in srgb,var(--good) 22%,transparent);color:var(--good)}
+.tier.MED{background:color-mix(in srgb,var(--warning) 26%,transparent);color:var(--warning)}
+.tier.HIGH{background:color-mix(in srgb,var(--critical) 24%,transparent);color:var(--critical)}
+.at{font-size:11px;color:var(--muted)}
+.mc-big{display:flex;align-items:baseline;gap:6px;margin:2px 0 8px}
+.mc-big span:first-child{font-size:30px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.mc-unit{font-size:11px;color:var(--muted)}
+.mc-rows{display:flex;flex-direction:column;gap:4px}
+.mc-rows>div{display:flex;justify-content:space-between;font-size:12px;color:var(--ink2)}
+.mc-rows b{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink)}
+.delta{font-size:11.5px;margin-top:2px}
+.delta.up{color:var(--critical)} .delta.down{color:var(--good)}
+.note{font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.35}
+.spark{width:100%;height:34px;margin-top:8px;display:block}
+.gauge{height:8px;border-radius:5px;background:var(--grid);overflow:hidden;margin:2px 0 4px}
+.gauge-fill{height:100%;width:0;border-radius:5px;transition:width .18s ease}
+
+/* ---- placeholder / start screen ---- */
+#placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+.ph-inner{max-width:460px;text-align:center;color:var(--ink2)}
+.ph-inner h1{font-size:24px;color:var(--ink);margin:0 0 18px}
+.start-combo{display:inline-block;text-align:left}
+.start-combo input{width:340px;font-size:15px;padding:11px 14px;text-align:center}
+.start-combo .dropdown{width:340px;text-align:left}
+
+/* ---- svg element styling ---- */
+text{fill:var(--muted);font-size:10.5px}
+.axis-tick{stroke:var(--grid);stroke-width:1}
+.axis-base{stroke:var(--axis);stroke-width:1}
+.thr-line{stroke:var(--ink2);stroke-dasharray:4 4;stroke-width:1;opacity:.7}
+.lane-alt{fill:color-mix(in srgb,var(--muted) 7%,transparent)}
+.abx-bar{cursor:pointer}
+.abx-bar:hover{filter:brightness(1.15)}
+.ghost-bar{opacity:.55;pointer-events:none}
+.readout-line{stroke:var(--accent);stroke-width:1.5;stroke-dasharray:3 3}
+.readout-handle{fill:var(--accent);cursor:ew-resize}
+/* the diversity / GMHI sparklines carry a draggable readout cursor too */
+#divSpark,#gmhiSpark{cursor:ew-resize}
+.entero-outline{fill:none;stroke:var(--ink);stroke-width:1.4;opacity:.75}
+.baseline-trace{fill:none;stroke:var(--ink2);stroke-width:1.4;stroke-dasharray:5 4;opacity:.6}
+/* overlays never intercept hover — the taxa tooltip should read the band underneath */
+.entero-outline,.baseline-trace,.readout-line,.readout-handle,.axis-tick,.axis-base,.thr-line{pointer-events:none}
+#compSvg text{pointer-events:none}
+.gut-ylabel{fill:var(--ink2);font-size:11px}
+.gut-catlabel{fill:var(--ink2);font-size:11px}
+.gut-catlabel.unused{fill:var(--muted);opacity:.7}
+.cur-dot{stroke:var(--surface-1);stroke-width:1.5}
+.hidden{display:none}
+#busy{position:fixed;top:8px;right:8px;width:9px;height:9px;border-radius:50%;background:var(--accent);opacity:.9;box-shadow:0 0 8px var(--accent)}
+
+.tooltip{position:fixed;pointer-events:none;z-index:60;background:var(--panel);
+  border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:11.5px;
+  color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.4);max-width:240px}
+.tooltip .tt-row{display:flex;align-items:center;gap:6px;justify-content:space-between}
+.tooltip .tt-sw{width:9px;height:9px;border-radius:2px;display:inline-block}
+.tooltip b{font-variant-numeric:tabular-nums}

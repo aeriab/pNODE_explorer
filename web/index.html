@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pNODE Antibiotic Explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="viz-root" data-theme="dark">
+<header id="topbar">
+  <div class="brand">
+    <div>
+      <div class="title">pNODE Antibiotic Explorer</div>
+      <div class="subtitle">gut-microbiome forecasting of allo-HCT patients at MSK</div>
+    </div>
+  </div>
+  <div class="controls">
+    <label class="ctl" id="patientCtl">Patient
+      <div class="combo">
+        <input id="patientSearch" placeholder="search patient…" autocomplete="off">
+        <div id="patientList" class="dropdown hidden"></div>
+      </div>
+    </label>
+    <label class="ctl" id="sampleCtl">16S sample
+      <select id="sampleSelect" disabled></select>
+    </label>
+    <button id="themeBtn" class="ghost" title="toggle light/dark">◑</button>
+  </div>
+</header>
+
+<main id="app" class="empty">
+  <section id="stage">
+    <!-- COMPOSITION -->
+    <div class="panel" id="compPanel">
+      <div class="panel-head">
+        <div class="head-left">
+          <h2 id="compTitle">Predicted microbiome composition</h2>
+          <label class="toggle"><input type="checkbox" id="obsToggle"><span>View observed abundances</span></label>
+        </div>
+        <div class="legend" id="compLegend"></div>
+      </div>
+      <div class="chartrow">
+        <div class="gutter" id="compGutter"></div>
+        <div class="scroll" id="scrollComp"><svg id="compSvg"></svg></div>
+      </div>
+      <div class="axis-caption">Day relative to HCT</div>
+    </div>
+
+    <!-- ABX EDITOR -->
+    <div class="panel" id="abxPanel">
+      <div class="panel-head">
+        <h2>Antibiotic timeline <span class="hint">— drag on a lane to add · click a bar to remove</span></h2>
+        <div class="panel-actions">
+          <button id="resetBtn" class="ghost sm">Reset to actual regimen</button>
+          <button id="clearBtn" class="ghost sm">Clear all</button>
+        </div>
+      </div>
+      <div class="chartrow">
+        <div class="gutter" id="abxGutter"></div>
+        <div class="scroll" id="scrollAbx"><svg id="abxSvg"></svg></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- METRICS -->
+  <aside id="metrics">
+    <div class="metric-card" id="mEntero">
+      <div class="mc-head"><span class="mc-title">Enterococcus BSI risk</span><span class="tier" id="enteroTier">—</span></div>
+      <div class="mc-rows">
+        <div><span>peak abundance</span><b id="enteroPeak">—</b></div>
+        <div><span>days dominated (21 d)</span><b id="enteroDays">—</b></div>
+        <div class="delta" id="enteroDelta"></div>
+      </div>
+      <svg class="spark" id="enteroSpark"></svg>
+    </div>
+
+    <div class="metric-card" id="mNon">
+      <div class="mc-head"><span class="mc-title">Gram-negative BSI risk</span><span class="tier" id="nonTier">—</span></div>
+      <div class="mc-rows">
+        <div><span>peak abundance</span><b id="nonPeak">—</b></div>
+        <div><span>baseline abundance</span><b id="nonA0">—</b></div>
+      </div>
+    </div>
+
+    <div class="metric-card" id="mDiv">
+      <div class="mc-head"><span class="mc-title">Alpha diversity</span><span class="at" id="divAt">@ +14 d</span></div>
+      <div class="mc-big"><span id="shannonVal">—</span><span class="mc-unit">Shannon</span></div>
+      <div class="mc-rows"><div><span>inverse Simpson</span><b id="invsimpVal">—</b></div></div>
+      <svg class="spark" id="divSpark"></svg>
+    </div>
+
+    <div class="metric-card" id="mGmhi">
+      <div class="mc-head"><span class="mc-title">Gut Microbiome Health Index</span><span class="at" id="gmhiAt">@ +14 d</span></div>
+      <div class="mc-big"><span id="gmhiVal">—</span><span class="mc-unit">/ 100</span></div>
+      <div class="gauge"><div class="gauge-fill" id="gmhiFill"></div></div>
+      <svg class="spark" id="gmhiSpark"></svg>
+    </div>
+  </aside>
+
+  <div id="placeholder">
+    <div class="ph-inner">
+      <h1>Pick a patient to begin</h1>
+      <div class="combo start-combo">
+        <input id="patientSearchStart" placeholder="search patient…" autocomplete="off">
+        <div id="patientListStart" class="dropdown hidden"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="busy" class="hidden"></div>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
