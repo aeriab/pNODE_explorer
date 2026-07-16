@@ -131,6 +131,10 @@ button.sm{padding:5px 9px;font-size:12px}
 .tu-axis{position:absolute;color:var(--muted);font-size:10px;pointer-events:none}
 @keyframes tu-pulse{0%{r:11px;opacity:.55}70%{r:22px;opacity:0}100%{r:22px;opacity:0}}
 .tu-dot-halo{animation:tu-pulse 1.8s ease-out infinite}
+/* the readout dot can be grabbed and slid along the predicted path */
+.tu-dot-core,.tu-dot-halo{cursor:grab}
+body.tu-dragging{cursor:grabbing}
+body.tu-dragging .tu-dot-core,body.tu-dragging .tu-dot-halo{cursor:grabbing}
 .scroll::-webkit-scrollbar{height:10px}
 .scroll::-webkit-scrollbar-thumb{background:var(--axis);border-radius:6px}
 
@@ -176,8 +180,10 @@ text{fill:var(--muted);font-size:10.5px}
 .ghost-bar{opacity:.55;pointer-events:none}
 .readout-line{stroke:var(--accent);stroke-width:1.5;stroke-dasharray:3 3}
 .readout-handle{fill:var(--accent);cursor:ew-resize}
-/* the diversity / GMHI sparklines carry a draggable readout cursor too */
-#divSpark,#gmhiSpark{cursor:ew-resize}
+/* the diversity / GMHI sparklines, and the trajectory / observed-abundance
+   charts, all let you click anywhere to jump the readout day, then drag —
+   the ew-resize cursor signals that the whole chart is a scrub target */
+#divSpark,#gmhiSpark,#compSvg,#obsSvg{cursor:ew-resize}
 .entero-outline{fill:none;stroke:var(--ink);stroke-width:1.4;opacity:.75}
 .baseline-trace{fill:none;stroke:var(--ink2);stroke-width:1.4;stroke-dasharray:5 4;opacity:.6}
 /* overlays never intercept hover — the taxa tooltip should read the band underneath */

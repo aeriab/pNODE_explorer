@@ -363,7 +363,7 @@ function renderTaxumap(){
   if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(); drawTaxumapLegend(); }
   if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); }
   taxumapMoveDot();
-  $('tuHint').textContent='drag the readout cursor (antibiotic timeline or a sparkline) to move the ● along the predicted path';
+  $('tuHint').textContent='drag the ● (or the readout cursor elsewhere) to move along the predicted path';
 }
 
 function setupTaxumapMap(w,h){
@@ -394,29 +394,51 @@ function drawTaxumapBackdrop(){
   ctx.globalAlpha=1;
 }
 
+// projects a subsample of the predicted trajectory (~1 point/day) and caches
+// the screen-space points + their days on _tu, both for drawing the path and
+// for hit-testing the readout dot drag (nearestTaxumapIndex / taxumapMoveDot)
 function drawTaxumapPath(){
   const svg=$('taxumapSvg'); const old=svg.querySelector('.tu-path'); if(old) old.remove();
+  _tu.pts=null; _tu.days=null;
   if(!S.fc||!S.fc.fullComp||!S.fc.fullComp.length) return;
-  const comps=S.fc.fullComp, step=Math.max(1,Math.floor(comps.length/44)), pts=[];
-  for(let i=0;i<comps.length;i+=step){ const z=TAXUMAP.project(comps[i]); if(z) pts.push(_tu.map(z[0],z[1])); }
-  const last=TAXUMAP.project(comps[comps.length-1]); if(last) pts.push(_tu.map(last[0],last[1]));
+  const comps=S.fc.fullComp, days=S.fc.day;
+  const step=Math.max(1,Math.round(comps.length/90));
+  const idxs=[];
+  for(let i=0;i<comps.length;i+=step) idxs.push(i);
+  if(idxs[idxs.length-1]!==comps.length-1) idxs.push(comps.length-1);
+  const pts=idxs.map(i=>{ const z=TAXUMAP.project(comps[i]); return z?_tu.map(z[0],z[1]):null; });
+  _tu.pts=pts; _tu.days=idxs.map(i=>days[i]);
   const g=el('g',{class:'tu-path'});
-  if(pts.length>1){
-    g.appendChild(el('path',{d:'M'+pts.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('L'),
+  const valid=pts.filter(Boolean);
+  if(valid.length>1){
+    g.appendChild(el('path',{d:'M'+valid.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('L'),
       fill:'none',stroke:cvar('--accent'),'stroke-width':1.6,'stroke-opacity':0.6,'stroke-linejoin':'round'}));
-    g.appendChild(el('circle',{cx:pts[0][0],cy:pts[0][1],r:3.2,fill:cvar('--surface-1'),
+    g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:cvar('--surface-1'),
       stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker
   }
   const dot=svg.querySelector('.tu-dot'); svg.insertBefore(g, dot||null);   // keep dot on top
 }
 
+// nearest cached path point to a local (x,y) in the taxumapSvg's own coordinate
+// space — used while dragging the readout dot along the trajectory
+function nearestTaxumapIndex(x,y){
+  if(!_tu||!_tu.pts) return null;
+  let bi=-1, bd=Infinity;
+  for(let i=0;i<_tu.pts.length;i++){
+    const p=_tu.pts[i]; if(!p) continue;
+    const d=(p[0]-x)*(p[0]-x)+(p[1]-y)*(p[1]-y);
+    if(d<bd){ bd=d; bi=i; }
+  }
+  return bi>=0?bi:null;
+}
+
 function taxumapMoveDot(){
-  if(!S.fc||!S.fc.fullComp||!_tu) return;
-  const svg=$('taxumapSvg'), days=S.fc.day;
+  if(!S.fc||!_tu||!_tu.pts||!_tu.pts.length) return;
+  const svg=$('taxumapSvg'), days=_tu.days;
   let bi=0,bd=Infinity;
   for(let i=0;i<days.length;i++){ const d=Math.abs(days[i]-S.readoutDay); if(d<bd){bd=d;bi=i;} }
-  const z=TAXUMAP.project(S.fc.fullComp[bi]); if(!z) return;
-  const p=_tu.map(z[0],z[1]);
+  const p=_tu.pts[bi]; if(!p) return;
+  _tu.dotPos=p;   // cached for the dot-grab hit-test in setupPointer()
   let dot=svg.querySelector('.tu-dot');
   if(!dot){
     dot=el('g',{class:'tu-dot'});
@@ -532,13 +554,19 @@ function renderAbxGutter(){
 // --------------------------------------------------------------------- //
 //  editing interactions
 // --------------------------------------------------------------------- //
-let drag=null, readoutDrag=null, sparkDrag=null;
+let drag=null, readoutDrag=null, sparkDrag=null, tuDrag=false;
+function refreshReadoutViews(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
 function setupPointer(){   // attached ONCE from init()
   const near=(ev,sv)=> Math.abs(localX(ev,sv)-xDay(S.readoutDay))<7;
-  // readout handle can be grabbed from any of the composition charts
+  // trajectory / observed-abundance charts: click anywhere to jump the readout
+  // day there, then drag — same behaviour as the diversity/GMHI sparklines
   ['compSvg','obsSvg'].forEach(id=>{
     $(id).addEventListener('pointerdown',(ev)=>{
-      if(S.fc && near(ev,$(id))){ readoutDrag=$(id); ev.preventDefault(); }
+      if(!S.fc) return;
+      readoutDrag=$(id);
+      S.readoutDay=clamp(Math.round(dayFromX(localX(ev,$(id)))), S.t0, S.t0+S.horizon);
+      refreshReadoutViews();
+      ev.preventDefault();
     });
   });
   // the diversity / GMHI sparklines: click-drag anywhere to move the readout day
@@ -547,6 +575,16 @@ function setupPointer(){   // attached ONCE from init()
       if(!S.fc) return;
       sparkDrag=$(id); setReadoutFromSpark(sparkDrag, ev.clientX); ev.preventDefault();
     });
+  });
+  // taxUMAP: grab the readout dot and slide it along the predicted path —
+  // the trajectory itself is unchanged, only the readout day (and hence the
+  // dot's position along the path) moves forward/back as you drag
+  $('taxumapSvg').addEventListener('pointerdown',(ev)=>{
+    if(!S.fc || !_tu || !_tu.pts || !_tu.dotPos) return;
+    const [x,y]=localXY(ev,$('taxumapSvg'));
+    if(Math.hypot(x-_tu.dotPos[0], y-_tu.dotPos[1])<14){
+      tuDrag=true; document.body.classList.add('tu-dragging'); ev.preventDefault();
+    }
   });
   const abx=$('abxSvg');
   abx.addEventListener('pointerdown',(ev)=>{
@@ -560,9 +598,15 @@ function setupPointer(){   // attached ONCE from init()
   });
   window.addEventListener('pointermove',(ev)=>{
     if(sparkDrag){ setReadoutFromSpark(sparkDrag, ev.clientX); return; }
+    if(tuDrag){
+      const [x,y]=localXY(ev,$('taxumapSvg'));
+      const idx=nearestTaxumapIndex(x,y);
+      if(idx!=null){ S.readoutDay=_tu.days[idx]; refreshReadoutViews(); }
+      return;
+    }
     if(readoutDrag){
       S.readoutDay=clamp(Math.round(dayFromX(localX(ev,readoutDrag))), S.t0, S.t0+S.horizon);
-      renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); return;
+      refreshReadoutViews(); return;
     }
     if(drag){
       drag.cur=snap(dayFromX(localX(ev,abx)));
@@ -572,6 +616,7 @@ function setupPointer(){   // attached ONCE from init()
   });
   window.addEventListener('pointerup',()=>{
     readoutDrag=null; sparkDrag=null;
+    if(tuDrag){ tuDrag=false; document.body.classList.remove('tu-dragging'); }
     if(drag){
       const moved=Math.abs(drag.cur-drag.start);
       if(moved<0.75) removeBarAt(drag.cat, drag.start);
@@ -582,13 +627,14 @@ function setupPointer(){   // attached ONCE from init()
 }
 
 function localX(ev,svg){ const s=svg||$('abxSvg'); const r=s.getBoundingClientRect(); return ev.clientX-r.left; }
+function localXY(ev,svg){ const r=svg.getBoundingClientRect(); return [ev.clientX-r.left, ev.clientY-r.top]; }
 // invert a sparkline's X scale (see sparkLine(): X=d=>2+(d-d0)/(dN-d0)*(w-4))
 function setReadoutFromSpark(svg, clientX){
   if(!S.fc) return;
   const r=svg.getBoundingClientRect(), days=S.fc.day, w=r.width||svg.clientWidth;
   const day=days[0]+(clientX-r.left-2)/(w-4)*(days[days.length-1]-days[0]);
   S.readoutDay=clamp(Math.round(day), S.t0, S.t0+S.horizon);
-  renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics();
+  refreshReadoutViews();
 }
 function hit(ev){
   const r=$('abxSvg').getBoundingClientRect();
