@@ -19,10 +19,22 @@ const TAXA_COLOR = {
 const cvar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 const taxaColor = (t) => cvar(TAXA_COLOR[t] || '--tx-other');
 
+// BSI (bloodstream-infection) event marker colours — vivid, high-contrast, and
+// deliberately distinct from the stacked-taxa fills underneath (both markers get
+// a black outline so they read against any band). Enterococcus = green,
+// gram-negative = red.
+const BSI_COLORS = { entero:'#28c76f', gramneg:'#ff3b30' };
+const BSI_LABELS = { entero:'Enterococcus BSI', gramneg:'Gram-negative BSI' };
+const bsiTip = (ev) => {
+  const span = (ev.span && ev.span[1] > ev.span[0])
+    ? ` (day ${ev.span[0]}–${ev.span[1]})` : ` (day ${ev.day})`;
+  return `${BSI_LABELS[ev.cat]||'BSI'}: ${ev.label}${span}`;
+};
+
 const S = {
   meta:null, patients:[], pid:null, t0:0, horizon:MAX_HORIZON,
   abxOrder:[], schedule:{}, baseSchedule:{}, observed:[],
-  observedComposition:[], compTaxa:null,
+  observedComposition:[], compTaxa:null, bsiEvents:[],
   fc:null, baseFc:null, readoutDay:14,
   pxPerDay:18, plotW:0,
 };
@@ -131,6 +143,7 @@ async function selectPatient(pid){
   const info = await api('/api/patient/'+encodeURIComponent(pid));
   S.pid=pid; S.abxOrder=info.abx_order; S.baseSchedule=info.schedule; S.observed=info.observed||[];
   S.observedComposition=info.observed_composition||[]; S.compTaxa=info.comp_taxa||null;
+  S.bsiEvents=info.bsi||[];
   const sel=$('sampleSelect'); sel.innerHTML=''; sel.disabled=false;
   info.samples.forEach((s,i)=>{
     const o=document.createElement('option'); o.value=JSON.stringify(s);
@@ -228,6 +241,20 @@ function buildLegend(){
   const d2=document.createElement('span'); d2.className='leg';
   d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
   lg.appendChild(d2);
+  appendBsiLegend(lg);
+}
+
+// append "● Enterococcus BSI / ● Gram-negative BSI" keys to a chart legend,
+// but only for the classes this patient actually has an event for
+function appendBsiLegend(lg){
+  const cats=new Set((S.bsiEvents||[]).map(e=>e.cat));
+  ['entero','gramneg'].forEach(cat=>{
+    if(!cats.has(cat)) return;
+    const d=document.createElement('span'); d.className='leg';
+    d.innerHTML=`<span class="sw bsi-key" style="background:${BSI_COLORS[cat]};`+
+      `border:1.5px solid #000;border-radius:50%"></span>${BSI_LABELS[cat]}`;
+    lg.appendChild(d);
+  });
 }
 
 function buildObsLegend(){
@@ -238,6 +265,7 @@ function buildObsLegend(){
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
   });
+  appendBsiLegend(lg);
 }
 
 // shared renderer for the two stacked-composition charts (trajectory + observed);
@@ -256,10 +284,32 @@ function renderChartPanel(svgId, scrollId, gutterId, drawFn){
   });
   // day axis
   drawDayAxis(g, top+plotH, true);
+  // BSI event markers (vertical lines) — under the readout cursor
+  drawBsiMarkers(g, top, plotH);
   // readout cursor
   drawReadout(g, top, plotH, y);
   svg.appendChild(g);
   renderCompGutter(gutterId, scrollId, y, top, plotH);
+}
+
+// vertical BSI-event markers for the trajectory + observed-abundance charts:
+// a coloured line (green Entero / red gram-neg) with a dark casing for contrast
+// and an outlined lollipop head + hover tooltip naming the organism.
+function drawBsiMarkers(g, top, plotH){
+  (S.bsiEvents||[]).forEach(ev=>{
+    if(ev.day < S.t0-1e-3 || ev.day > S.t0+S.horizon+1e-3) return;
+    const x=xDay(ev.day), color=BSI_COLORS[ev.cat]||'#888';
+    const grp=el('g',{class:'bsi-marker'});
+    grp.appendChild(el('line',{x1:x,y1:top,x2:x,y2:top+plotH,stroke:'#000',
+      'stroke-width':4,'stroke-opacity':0.28,'pointer-events':'none'}));
+    grp.appendChild(el('line',{x1:x,y1:top,x2:x,y2:top+plotH,stroke:color,
+      'stroke-width':2,'stroke-opacity':0.95,'pointer-events':'none'}));
+    const head=el('circle',{cx:x.toFixed(1),cy:top.toFixed(1),r:5.5,fill:color,
+      stroke:'#000','stroke-width':1.5,class:'bsi-head'});
+    head.appendChild(el('title',{},[txt(bsiTip(ev))]));
+    grp.appendChild(head);
+    g.appendChild(grp);
+  });
 }
 
 function renderComposition(){
@@ -360,8 +410,9 @@ function renderTaxumap(){
   const w=wrap.clientWidth, h=wrap.clientHeight;
   if(w<10||h<10) return;
   const sizeChanged=!_tu||_tu.w!==w||_tu.h!==h;
-  if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(); drawTaxumapLegend(); }
-  if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); }
+  if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(); }
+  // legend + path both depend on the current patient's forecast (and BSI events)
+  if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); drawTaxumapLegend(); }
   taxumapMoveDot();
   $('tuHint').textContent='drag the ● (or the readout cursor elsewhere) to move along the predicted path';
 }
@@ -416,6 +467,18 @@ function drawTaxumapPath(){
     g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:cvar('--surface-1'),
       stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker
   }
+  // BSI event dots: place each event on the path point nearest its day
+  (S.bsiEvents||[]).forEach(ev=>{
+    if(!_tu.days.length) return;
+    if(ev.day < _tu.days[0]-1e-3 || ev.day > _tu.days[_tu.days.length-1]+1e-3) return;
+    let bi=0, bd=Infinity;
+    for(let i=0;i<_tu.days.length;i++){ const dd=Math.abs(_tu.days[i]-ev.day); if(dd<bd){bd=dd;bi=i;} }
+    const p=pts[bi]; if(!p) return;
+    const circ=el('circle',{cx:p[0].toFixed(1),cy:p[1].toFixed(1),r:6.5,
+      fill:BSI_COLORS[ev.cat]||'#888',stroke:'#000','stroke-width':2,class:'tu-bsi'});
+    circ.appendChild(el('title',{},[txt(bsiTip(ev))]));
+    g.appendChild(circ);
+  });
   const dot=svg.querySelector('.tu-dot'); svg.insertBefore(g, dot||null);   // keep dot on top
 }
 
@@ -464,6 +527,19 @@ function drawTaxumapLegend(){
     row.innerHTML=`<span class="tu-sw" style="background:${info.classColors[c]}"></span>${info.classLabels[c]}`;
     lg.appendChild(row);
   });
+  const cats=new Set((S.bsiEvents||[]).map(e=>e.cat));
+  if(cats.size){
+    const hd=document.createElement('div'); hd.className='tu-row';
+    hd.style.fontWeight='600'; hd.style.marginTop='5px'; hd.textContent='BSI event';
+    lg.appendChild(hd);
+    ['entero','gramneg'].forEach(cat=>{
+      if(!cats.has(cat)) return;
+      const row=document.createElement('div'); row.className='tu-row';
+      row.innerHTML=`<span class="tu-sw" style="background:${BSI_COLORS[cat]};`+
+        `border:1.5px solid #000;border-radius:50%"></span>${BSI_LABELS[cat]}`;
+      lg.appendChild(row);
+    });
+  }
 }
 
 function drawDayAxis(g, yBase, showLabels){

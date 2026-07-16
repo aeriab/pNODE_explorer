@@ -26,16 +26,18 @@
     return r.json();
   }
 
-  let MODEL = null, META = null, PIDX = null;
+  let MODEL = null, META = null, PIDX = null, BSI = {};
   const PCACHE = {};   // pid -> patient detail (comps stripped, as the old API returned)
   const COMP = {};     // pid -> { sample_id: Float64Array(N) } start compositions
 
   async function ensureLoaded() {
     if (MODEL) return;
-    const [m, meta, pidx] = await Promise.all([
+    const [m, meta, pidx, bsi] = await Promise.all([
       loadJSON('model.json'), loadJSON('meta.json'), loadJSON('patients/index.json'),
+      // BSI (bloodstream-infection) events per patient — optional overlay data
+      loadJSON('bsi.json').catch(() => ({})),
     ]);
-    MODEL = m; META = meta; PIDX = pidx;
+    MODEL = m; META = meta; PIDX = pidx; BSI = bsi || {};
     MODEL.W1 = Float64Array.from(m.W1); MODEL.b1 = Float64Array.from(m.b1);
     MODEL.W2 = Float64Array.from(m.W2); MODEL.b2 = Float64Array.from(m.b2);
     MODEL.W3 = Float64Array.from(m.W3); MODEL.b3 = Float64Array.from(m.b3);
@@ -273,6 +275,8 @@
         samples: d.samples.map((s) => ({ sample_id: s.sample_id, day: s.day })),
         schedule: d.schedule, abx_order: d.abx_order,
         observed: d.observed || [], day_range: d.day_range,
+        // bloodstream-infection events (day rel. HCT, class, organism) for overlays
+        bsi: BSI[String(pid)] || [],
         // observed 16S composition, as display bands, for the "view observed" chart
         observed_composition: d.samples.map((s) => ({
           day: s.day, values: compBandsVec(COMP[pid][s.sample_id]),
