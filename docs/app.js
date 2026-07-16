@@ -22,12 +22,13 @@ const taxaColor = (t) => cvar(TAXA_COLOR[t] || '--tx-other');
 const S = {
   meta:null, patients:[], pid:null, t0:0, horizon:MAX_HORIZON,
   abxOrder:[], schedule:{}, baseSchedule:{}, observed:[],
-  observedComposition:[], compTaxa:null, showObserved:false, showTaxumap:false,
+  observedComposition:[], compTaxa:null,
   fc:null, baseFc:null, readoutDay:14,
   pxPerDay:18, plotW:0,
 };
 
 const $ = (id) => document.getElementById(id);
+const isExpanded = (panelId) => { const p=$(panelId); return !!p && !p.classList.contains('collapsed'); };
 const el = (tag, attrs={}, kids=[]) => {
   const n = document.createElementNS(SVGNS, tag);
   for (const k in attrs) n.setAttribute(k, attrs[k]);
@@ -51,33 +52,45 @@ async function init(){
   $('resetBtn').addEventListener('click', ()=>{ S.schedule=clone(S.baseSchedule); commit(); });
   $('clearBtn').addEventListener('click', ()=>{ S.schedule={}; commit(); });
   $('themeBtn').addEventListener('click', toggleTheme);
-  $('obsToggle').addEventListener('change', e=>{
-    if(e.target.checked){ S.showTaxumap=false; $('tuToggle').checked=false; }
-    S.showObserved = e.target.checked;
-    applyCompView();
+  // each panel (trajectory / observed abundance / taxUMAP / abx timeline) can be
+  // independently collapsed to just its header, or expanded to show its body
+  ['trajPanel','obsPanel','tuPanel','abxPanel'].forEach(pid=>{
+    const panel=$(pid), btn=panel.querySelector('.panel-toggle');
+    btn.addEventListener('click', ()=>{
+      const collapsed=panel.classList.toggle('collapsed');
+      btn.textContent = collapsed ? '▸' : '▾';
+      btn.title = collapsed ? 'expand' : 'collapse';
+      if(!collapsed && S.fc){   // a panel becoming visible needs its chart (re)drawn
+        if(pid==='trajPanel') renderComposition();
+        else if(pid==='obsPanel') renderObserved();
+        else if(pid==='tuPanel') renderTaxumap();
+        else if(pid==='abxPanel') renderAbx();
+      }
+    });
   });
-  $('tuToggle').addEventListener('change', e=>{
-    if(e.target.checked){ S.showObserved=false; $('obsToggle').checked=false; }
-    S.showTaxumap = e.target.checked;
-    applyCompView();
-  });
-  window.addEventListener('resize', ()=>{ if(S.fc){ layout(); renderAll(); if(S.showTaxumap) renderTaxumap(); }});
+  window.addEventListener('resize', ()=>{ if(S.fc){ layout(); renderAll(); }});
   setupPointer();
   setupCompTooltip();
-  // keep the composition and antibiotic charts horizontally aligned while scrolling
+  // keep the trajectory / observed / antibiotic charts horizontally aligned
+  // while scrolling — they all share the same day axis
+  const hScroll=['scrollComp','scrollObs','scrollAbx'].map($);
   let syncing=false;
-  const sync=(a,b)=>a.addEventListener('scroll',()=>{ if(syncing)return; syncing=true; b.scrollLeft=a.scrollLeft; syncing=false; });
-  sync($('scrollAbx'),$('scrollComp')); sync($('scrollComp'),$('scrollAbx'));
+  hScroll.forEach(a=>a.addEventListener('scroll', ()=>{
+    if(syncing) return; syncing=true;
+    hScroll.forEach(b=>{ if(b!==a) b.scrollLeft=a.scrollLeft; });
+    syncing=false;
+  }));
   // horizontal wheel/trackpad ANYWHERE over the left panel scrolls the shared
-  // day-axis timeline — even over gaps, gutters, headings or text.
+  // day-axis timeline — even over gaps, gutters, headings or text. Plain
+  // vertical wheel is left alone so it scrolls the stage (all panels) as usual.
   $('stage').addEventListener('wheel', (e)=>{
     const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
     const dx = horiz ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
     if(!dx || !S.fc) return;
     e.preventDefault();
-    const a=$('scrollComp'), b=$('scrollAbx');
+    const a=hScroll[0];
     const nl=clamp(a.scrollLeft + dx, 0, Math.max(0, a.scrollWidth - a.clientWidth));
-    a.scrollLeft=nl; b.scrollLeft=nl;
+    hScroll.forEach(sc=>{ sc.scrollLeft=nl; });
   }, {passive:false});
 }
 
@@ -154,7 +167,7 @@ async function loadForecast(resetSchedule){
   S.fc = await api('/api/forecast',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body(S.schedule))});
   busy(false);
-  buildLegend(); layout(); renderAll();
+  buildLegend(); buildObsLegend(); layout(); renderAll();
 }
 
 let _inflight=false, _dirty=false;
@@ -199,45 +212,44 @@ function dayTicks(){
 }
 
 // --------------------------------------------------------------------- //
-//  composition chart
+//  composition charts (trajectory + observed abundance)
 // --------------------------------------------------------------------- //
-function renderAll(){ renderComposition(); renderAbx(); renderMetrics(); }
+function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
 
 function buildLegend(){
   const lg=$('compLegend'); lg.innerHTML='';
-  if(S.showTaxumap) return;   // TaxUMAP view has its own class legend
   const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
   taxa.forEach(t=>{
     const d=document.createElement('span'); d.className='leg';
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
   });
-  // the dashed baseline trace only appears in the predicted view
-  if(!S.showObserved){
-    const d2=document.createElement('span'); d2.className='leg';
-    d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
-    lg.appendChild(d2);
-  }
+  // the dashed baseline trace only appears in the predicted (trajectory) view
+  const d2=document.createElement('span'); d2.className='leg';
+  d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
+  lg.appendChild(d2);
 }
 
-function applyCompView(){
-  $('compPanel').classList.toggle('taxumap-mode', S.showTaxumap);
-  $('compTitle').textContent = S.showTaxumap ? 'TaxUMAP community map'
-    : S.showObserved ? 'Observed microbiome composition (16S samples)'
-    : 'Predicted microbiome composition';
-  if(S.fc){ buildLegend(); renderComposition(); }
+function buildObsLegend(){
+  const lg=$('obsLegend'); lg.innerHTML='';
+  const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
+  taxa.forEach(t=>{
+    const d=document.createElement('span'); d.className='leg';
+    d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
+    lg.appendChild(d);
+  });
 }
 
-function renderComposition(){
-  if(S.showTaxumap){ renderTaxumap(); return; }
-  const svg=$('compSvg'); const H=$('scrollComp').clientHeight||300;
+// shared renderer for the two stacked-composition charts (trajectory + observed);
+// each draws into its own svg/gutter/scroll but shares the day-axis scale
+function renderChartPanel(svgId, scrollId, gutterId, drawFn){
+  const svg=$(svgId); const H=$(scrollId).clientHeight||300;
   const plotH=H-COMP_AXIS_H-4, top=4;
   svg.setAttribute('width',S.plotW); svg.setAttribute('height',H);
   svg.setAttribute('viewBox',`0 0 ${S.plotW} ${H}`); svg.innerHTML='';
   const g=el('g');
   const y=(v)=> top + (1-v)*plotH;                     // v in [0,1]
-  if(S.showObserved) drawObservedBars(g, y);
-  else drawPredicted(g, y);
+  drawFn(g, y);
   // y grid + axis ticks
   [0,0.25,0.5,0.75,1].forEach(v=>{
     g.appendChild(el('line',{x1:PAD_L,y1:y(v),x2:S.plotW-PAD_R,y2:y(v),class:'axis-tick',opacity:v===0?0:0.5}));
@@ -247,7 +259,17 @@ function renderComposition(){
   // readout cursor
   drawReadout(g, top, plotH, y);
   svg.appendChild(g);
-  renderCompGutter(y, top, plotH);
+  renderCompGutter(gutterId, scrollId, y, top, plotH);
+}
+
+function renderComposition(){
+  if(!S.fc || !isExpanded('trajPanel')) return;
+  renderChartPanel('compSvg','scrollComp','compGutter', drawPredicted);
+}
+
+function renderObserved(){
+  if(!S.fc || !isExpanded('obsPanel')) return;
+  renderChartPanel('obsSvg','scrollObs','obsGutter', drawObservedBars);
 }
 
 // predicted view: stacked pNODE trajectory areas + dashed actual-regimen Entero trace
@@ -293,19 +315,23 @@ function drawObservedBars(g, y){
   });
 }
 
-// hover tooltip naming the taxon (and its abundance) under the cursor
+// hover tooltip naming the taxon (and its abundance) under the cursor —
+// attached to both the trajectory (predicted) and observed-abundance charts
 let _tipEl=null;
 function setupCompTooltip(){
   if(!_tipEl){ _tipEl=document.createElement('div'); _tipEl.className='tooltip';
     _tipEl.style.display='none'; document.body.appendChild(_tipEl); }
-  const svg=$('compSvg'), tip=_tipEl, hide=()=>{ tip.style.display='none'; };
+  ['compSvg','obsSvg'].forEach(attachCompTooltip);
+}
+function attachCompTooltip(svgId){
+  const svg=$(svgId), tip=_tipEl, hide=()=>{ tip.style.display='none'; };
   svg.addEventListener('pointermove',(ev)=>{
     if(drag||readoutDrag){ hide(); return; }
     const t=ev.target, name=t&&t.getAttribute&&t.getAttribute('data-taxa');
     if(!name){ hide(); return; }
     let val=null;
     if(t.hasAttribute('data-val')) val=+t.getAttribute('data-val');
-    else if(!S.showObserved && S.fc){
+    else if(S.fc){   // predicted (trajectory) path: interpolate the value under the cursor
       val=interp(S.fc.day, S.fc.composition.values[+t.getAttribute('data-idx')], dayFromX(localX(ev,svg)));
     }
     tip.innerHTML=`<span class="tt-sw" style="background:${taxaColor(name)}"></span>${name}`+
@@ -323,10 +349,11 @@ function setupCompTooltip(){
 // --------------------------------------------------------------------- //
 let _tu=null;   // {w,h,dpr,map,fc}
 function renderTaxumap(){
+  if(!S.fc || !isExpanded('tuPanel')) return;
   const wrap=$('taxumapWrap');
   if(!(window.TAXUMAP && TAXUMAP.ready())){
     $('tuHint').textContent='loading TaxUMAP reference cloud…';
-    if(window.TAXUMAP) TAXUMAP.load().then(()=>{ if(S.showTaxumap) renderTaxumap(); })
+    if(window.TAXUMAP) TAXUMAP.load().then(()=>{ if(isExpanded('tuPanel')) renderTaxumap(); })
       .catch(e=>{ $('tuHint').textContent='TaxUMAP load failed: '+e.message; });
     return;
   }
@@ -436,9 +463,9 @@ function drawReadout(g, top, plotH, y){
   g.appendChild(handle);
 }
 
-function renderCompGutter(y, top, plotH){
-  const gut=$('compGutter'); gut.innerHTML='';
-  const svg=el('svg',{width:132,height:$('scrollComp').clientHeight||300});
+function renderCompGutter(gutterId, scrollId, y, top, plotH){
+  const gut=$(gutterId); gut.innerHTML='';
+  const svg=el('svg',{width:132,height:$(scrollId).clientHeight||300});
   [0,0.25,0.5,0.75,1].forEach(v=>{
     svg.appendChild(el('text',{x:124,y:y(v)+3,'text-anchor':'end',class:'gut-ylabel'},[txt(v.toFixed(2))]));
   });
@@ -452,11 +479,13 @@ const txt=(s)=>document.createTextNode(s);
 //  antibiotic editor
 // --------------------------------------------------------------------- //
 function renderAbx(){
+  if(!S.fc || !isExpanded('abxPanel')) return;
   const svg=$('abxSvg');
   const n=S.abxOrder.length;
   const plotH=n*LANE_H;
   const H=plotH+ABX_AXIS_H+2;
-  $('scrollAbx').style.minHeight=Math.min(H+14, 400)+'px';
+  // no internal scroll any more — the whole stage scrolls, so just size to fit all lanes
+  $('scrollAbx').style.minHeight=(H+14)+'px';
   svg.setAttribute('width',S.plotW); svg.setAttribute('height',H);
   svg.setAttribute('viewBox',`0 0 ${S.plotW} ${H}`); svg.innerHTML='';
   const g=el('g');
@@ -506,9 +535,11 @@ function renderAbxGutter(){
 let drag=null, readoutDrag=null, sparkDrag=null;
 function setupPointer(){   // attached ONCE from init()
   const near=(ev,sv)=> Math.abs(localX(ev,sv)-xDay(S.readoutDay))<7;
-  // readout handle can be grabbed from either chart
-  $('compSvg').addEventListener('pointerdown',(ev)=>{
-    if(S.fc && near(ev,$('compSvg'))){ readoutDrag=$('compSvg'); ev.preventDefault(); }
+  // readout handle can be grabbed from any of the composition charts
+  ['compSvg','obsSvg'].forEach(id=>{
+    $(id).addEventListener('pointerdown',(ev)=>{
+      if(S.fc && near(ev,$(id))){ readoutDrag=$(id); ev.preventDefault(); }
+    });
   });
   // the diversity / GMHI sparklines: click-drag anywhere to move the readout day
   ['divSpark','gmhiSpark'].forEach(id=>{
@@ -531,7 +562,7 @@ function setupPointer(){   // attached ONCE from init()
     if(sparkDrag){ setReadoutFromSpark(sparkDrag, ev.clientX); return; }
     if(readoutDrag){
       S.readoutDay=clamp(Math.round(dayFromX(localX(ev,readoutDrag))), S.t0, S.t0+S.horizon);
-      renderComposition(); renderAbx(); renderMetrics(); return;
+      renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); return;
     }
     if(drag){
       drag.cur=snap(dayFromX(localX(ev,abx)));
@@ -557,7 +588,7 @@ function setReadoutFromSpark(svg, clientX){
   const r=svg.getBoundingClientRect(), days=S.fc.day, w=r.width||svg.clientWidth;
   const day=days[0]+(clientX-r.left-2)/(w-4)*(days[days.length-1]-days[0]);
   S.readoutDay=clamp(Math.round(day), S.t0, S.t0+S.horizon);
-  renderComposition(); renderAbx(); renderMetrics();
+  renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics();
 }
 function hit(ev){
   const r=$('abxSvg').getBoundingClientRect();

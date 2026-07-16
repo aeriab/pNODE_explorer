@@ -30,42 +30,77 @@
 
 <main id="app" class="empty">
   <section id="stage">
-    <!-- COMPOSITION -->
-    <div class="panel" id="compPanel">
+    <!-- TRAJECTORY (predicted composition) — expanded by default -->
+    <div class="panel" id="trajPanel">
       <div class="panel-head">
         <div class="head-left">
-          <h2 id="compTitle">Predicted microbiome composition</h2>
-          <label class="toggle"><input type="checkbox" id="obsToggle"><span>View observed abundances</span></label>
-          <label class="toggle"><input type="checkbox" id="tuToggle"><span>View taxUMAP</span></label>
+          <button class="panel-toggle" id="trajToggle" title="collapse">▾</button>
+          <h2>Predicted microbiome composition</h2>
         </div>
         <div class="legend" id="compLegend"></div>
       </div>
-      <div class="chartrow">
-        <div class="gutter" id="compGutter"></div>
-        <div class="scroll" id="scrollComp"><svg id="compSvg"></svg></div>
-      </div>
-      <div class="axis-caption">Day relative to HCT</div>
-      <!-- TaxUMAP view (hidden unless the toggle is on) -->
-      <div id="taxumapWrap" class="hidden">
-        <canvas id="taxumapCanvas"></canvas>
-        <svg id="taxumapSvg"></svg>
-        <div class="tu-legend" id="tuLegend"></div>
-        <div class="tu-hint" id="tuHint">drag the readout cursor (on the antibiotic timeline or a sparkline) to move the ● along the predicted path</div>
+      <div class="panel-body chart-body" id="trajBody">
+        <div class="chartrow">
+          <div class="gutter" id="compGutter"></div>
+          <div class="scroll" id="scrollComp"><svg id="compSvg"></svg></div>
+        </div>
+        <div class="axis-caption">Day relative to HCT</div>
       </div>
     </div>
 
-    <!-- ABX EDITOR -->
+    <!-- OBSERVED ABUNDANCE — collapsed by default -->
+    <div class="panel collapsed" id="obsPanel">
+      <div class="panel-head">
+        <div class="head-left">
+          <button class="panel-toggle" id="obsToggle" title="expand">▸</button>
+          <h2>Observed microbiome composition (16S samples)</h2>
+        </div>
+        <div class="legend" id="obsLegend"></div>
+      </div>
+      <div class="panel-body chart-body" id="obsBody">
+        <div class="chartrow">
+          <div class="gutter" id="obsGutter"></div>
+          <div class="scroll" id="scrollObs"><svg id="obsSvg"></svg></div>
+        </div>
+        <div class="axis-caption">Day relative to HCT</div>
+      </div>
+    </div>
+
+    <!-- TAXUMAP — collapsed by default -->
+    <div class="panel collapsed" id="tuPanel">
+      <div class="panel-head">
+        <div class="head-left">
+          <button class="panel-toggle" id="tuToggle" title="expand">▸</button>
+          <h2>TaxUMAP community map</h2>
+        </div>
+      </div>
+      <div class="panel-body tu-body" id="tuBody">
+        <div id="taxumapWrap">
+          <canvas id="taxumapCanvas"></canvas>
+          <svg id="taxumapSvg"></svg>
+          <div class="tu-legend" id="tuLegend"></div>
+          <div class="tu-hint" id="tuHint">drag the readout cursor (on the antibiotic timeline or a sparkline) to move the ● along the predicted path</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ABX EDITOR — expanded by default -->
     <div class="panel" id="abxPanel">
       <div class="panel-head">
-        <h2>Antibiotic timeline <span class="hint">— drag on a lane to add · click a bar to remove</span></h2>
+        <div class="head-left">
+          <button class="panel-toggle" id="abxToggle" title="collapse">▾</button>
+          <h2>Antibiotic timeline <span class="hint">— drag on a lane to add · click a bar to remove</span></h2>
+        </div>
         <div class="panel-actions">
           <button id="resetBtn" class="ghost sm">Reset to actual regimen</button>
           <button id="clearBtn" class="ghost sm">Clear all</button>
         </div>
       </div>
-      <div class="chartrow">
-        <div class="gutter" id="abxGutter"></div>
-        <div class="scroll" id="scrollAbx"><svg id="abxSvg"></svg></div>
+      <div class="panel-body" id="abxBody">
+        <div class="chartrow">
+          <div class="gutter" id="abxGutter"></div>
+          <div class="scroll" id="scrollAbx"><svg id="abxSvg"></svg></div>
+        </div>
       </div>
     </div>
   </section>

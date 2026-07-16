@@ -75,16 +75,21 @@ button.sm{padding:5px 9px;font-size:12px}
   height:calc(100vh - 57px);position:relative}
 #app.empty #stage,#app.empty #metrics{visibility:hidden}
 #app:not(.empty) #placeholder{display:none}
-#stage{display:flex;flex-direction:column;gap:12px;padding:14px;overflow:hidden;min-width:0}
+/* the whole left-hand stage scrolls vertically as ONE unit — panels never
+   scroll internally, they just contribute their natural (or fixed chart)
+   height, same as how the metrics rail on the right behaves */
+#stage{display:flex;flex-direction:column;gap:12px;padding:14px;overflow-y:auto;overflow-x:hidden;min-width:0}
 .panel{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
-  padding:12px 14px;display:flex;flex-direction:column;min-height:0}
-#compPanel{flex:1 1 58%}
-#abxPanel{flex:1 1 42%}
-.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px 20px;margin-bottom:8px;flex-wrap:wrap}
+  padding:12px 14px;display:flex;flex-direction:column;min-height:0;flex:0 0 auto}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap}
+.panel:not(.collapsed) .panel-head{margin-bottom:8px}
 .panel-head h2{margin:0;font-size:13px;font-weight:600;letter-spacing:.2px}
-.head-left{display:flex;align-items:center;gap:14px;min-width:0;flex-wrap:wrap;row-gap:6px}
-.toggle{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink2);cursor:pointer;white-space:nowrap}
-.toggle input{width:auto;margin:0;cursor:pointer}
+/* title + toggles wrap instead of overflowing under the legend when the panel is narrow */
+.head-left{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;min-width:0}
+.legend{margin-left:auto}
+.panel-toggle{flex:0 0 auto;width:22px;height:22px;padding:0;line-height:1;font-size:12px;
+  border-radius:6px;background:transparent}
+.panel-toggle:hover{background:var(--panel);border-color:var(--accent)}
 .hint{font-weight:400;color:var(--muted);font-size:11.5px}
 .panel-actions{display:flex;gap:9px;align-items:center}
 .barkey{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--muted)}
@@ -96,11 +101,17 @@ button.sm{padding:5px 9px;font-size:12px}
 .leg{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--ink2);cursor:default}
 .leg .sw{width:10px;height:10px;border-radius:3px}
 
-.chartrow{display:flex;flex:1;min-height:0}
-/* the antibiotic timeline scrolls VERTICALLY to reveal lower treatment lanes;
-   gutter (labels) and bars scroll together (align-items:flex-start so both take
-   their intrinsic tall height) */
-#abxPanel .chartrow{overflow-y:auto;align-items:flex-start}
+/* collapsed panels show only their header — the body (chart/editor) is removed
+   from flow entirely so the stage stays compact until expanded */
+.panel-body{display:flex;flex-direction:column;min-height:0}
+.panel.collapsed .panel-body{display:none}
+/* trajectory / observed-abundance charts get a fixed plot height (there's no
+   natural content height for an area chart the way there is for the abx lanes) */
+.chart-body{height:400px}
+.chart-body .chartrow{flex:1;min-height:0}
+.tu-body{height:460px}
+
+.chartrow{display:flex;min-height:0}
 .gutter{flex:0 0 132px;position:relative}
 .gutter svg{display:block}
 .scroll{flex:1;overflow-x:auto;overflow-y:hidden;min-width:0}
@@ -108,9 +119,7 @@ button.sm{padding:5px 9px;font-size:12px}
 .axis-caption{margin-left:132px;text-align:center;font-size:11px;color:var(--muted);padding-top:3px}
 
 /* ---- TaxUMAP view ---- */
-#taxumapWrap{display:none}
-#compPanel.taxumap-mode .chartrow,#compPanel.taxumap-mode .axis-caption{display:none}
-#compPanel.taxumap-mode #taxumapWrap{display:block;position:relative;flex:1;min-height:0;overflow:hidden}
+#taxumapWrap{position:relative;width:100%;height:100%;overflow:hidden}
 #taxumapCanvas,#taxumapSvg{position:absolute;inset:0;width:100%;height:100%}
 .tu-legend{position:absolute;top:8px;right:10px;display:flex;flex-direction:column;gap:2px;
   background:color-mix(in srgb,var(--surface-1) 84%,transparent);border:1px solid var(--border);
@@ -187,22 +196,3 @@ text{fill:var(--muted);font-size:10.5px}
 .tooltip .tt-row{display:flex;align-items:center;gap:6px;justify-content:space-between}
 .tooltip .tt-sw{width:9px;height:9px;border-radius:2px;display:inline-block}
 .tooltip b{font-variant-numeric:tabular-nums}
-
-/* ---- responsive: below this width the fixed 320px metrics rail crushes
-   the composition panel down to a sliver, taking the taxUMAP toggle with it ---- */
-@media (max-width:960px){
-  body{overflow-y:auto}
-  #topbar{flex-wrap:wrap;row-gap:8px}
-  .combo input{width:150px}
-  #app{grid-template-columns:1fr;grid-template-rows:auto auto;height:auto;min-height:calc(100vh - 57px)}
-  #stage{overflow:visible}
-  #compPanel{flex:none;height:min(70vh,520px)}
-  #abxPanel{flex:none;height:min(60vh,420px)}
-  #metrics{overflow:visible;padding:0 14px 14px}
-  .legend{max-width:100%;justify-content:flex-start}
-}
-@media (max-width:520px){
-  .start-combo input{width:min(80vw,300px)}
-  .controls{flex-wrap:wrap;justify-content:flex-start;row-gap:8px}
-  #sampleCtl select{max-width:150px}
-}
