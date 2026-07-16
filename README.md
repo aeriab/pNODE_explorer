@@ -1,1 +1,1 @@
-Try out the pNODE explorer here: https://github.com/BrendanBio/pNODE_explorersdfg aegsdfbsdb dxvb 
+Try out the pNODE explorer here: https://brendanbio.github.io/pNODE_explorer/
