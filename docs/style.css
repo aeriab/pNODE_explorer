@@ -185,7 +185,7 @@ text{fill:var(--muted);font-size:10.5px}
    the ew-resize cursor signals that the whole chart is a scrub target */
 #divSpark,#gmhiSpark,#compSvg,#obsSvg{cursor:ew-resize}
 .entero-outline{fill:none;stroke:var(--ink);stroke-width:1.4;opacity:.75}
-.baseline-trace{fill:none;stroke:var(--ink2);stroke-width:1.4;stroke-dasharray:5 4;opacity:.6}
+.baseline-trace{fill:none;stroke:var(--ink2);stroke-width:2;stroke-dasharray:7 5;stroke-linecap:butt;opacity:.95;shape-rendering:crispEdges}
 /* overlays never intercept hover — the taxa tooltip should read the band underneath */
 .entero-outline,.baseline-trace,.readout-line,.readout-handle,.axis-tick,.axis-base,.thr-line{pointer-events:none}
 #compSvg text{pointer-events:none}

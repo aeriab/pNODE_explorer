@@ -357,6 +357,17 @@ function renderObserved(){
   renderChartPanel('obsSvg','scrollObs','obsGutter', drawObservedBars);
 }
 
+// Enterococcus's per-day value as actually drawn in the stacked composition bands
+// (renormalised over the real genera). fc.entero is the raw, un-renormalised model
+// output, which drifts slightly from the band whenever probability mass sits in the
+// non-biological placeholder slots — using the band value instead makes the outline/
+// baseline traces land exactly on the band's top edge (Enterococcus is always the
+// bottom band; see computeTaxaOrder), not just approximately.
+function enteroBand(fc){
+  const idx=fc.composition.taxa.indexOf('Enterococcus');
+  return idx>=0 ? fc.composition.values[idx] : fc.entero;
+}
+
 // predicted view: stacked pNODE trajectory areas + dashed actual-regimen Entero trace
 function drawPredicted(g, y){
   const days=S.fc.day, vals=S.fc.composition.values, taxa=S.fc.composition.taxa;
@@ -371,11 +382,11 @@ function drawPredicted(g, y){
     cum=upper;
   }
   if(S.baseFc){
-    const be=S.baseFc.entero, bd=S.baseFc.day;
+    const be=enteroBand(S.baseFc), bd=S.baseFc.day;
     g.appendChild(el('path',{class:'baseline-trace',
       d:'M'+bd.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(be[i]).toFixed(1)}`).join('L')}));
   }
-  const e=S.fc.entero;
+  const e=enteroBand(S.fc);
   g.appendChild(el('path',{class:'entero-outline',
     d:'M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(e[i]).toFixed(1)}`).join('L')}));
 }
