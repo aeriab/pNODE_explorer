@@ -250,6 +250,9 @@ function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); re
 // under its band over all days t0..t0+horizon), independent of the readout day or
 // scroll position. Drives both the stacking order (largest at the bottom) and which
 // genera are named in the legend (top TOP_N). Stable while the user scrubs/scrolls.
+// Enterococcus is forced to the very bottom of the stack (ahead of the rank sort) so
+// its band's top edge sits at the same y as its raw value, letting it be compared
+// directly against the dashed actual-regimen Entero trace drawn from the axis.
 function computeTaxaOrder(){
   const taxa=(S.fc&&S.fc.composition.taxa)||S.compTaxa||[];
   const vals=S.fc&&S.fc.composition.values;
@@ -257,7 +260,9 @@ function computeTaxaOrder(){
     let s=0; const col=vals&&vals[i]; if(col) for(let k=0;k<col.length;k++) s+=col[k];
     return s;
   });
-  S.taxaOrder=taxa.map((_,i)=>i).sort((a,b)=>total[b]-total[a]);
+  const enteroIdx=taxa.indexOf('Enterococcus');
+  const rest=taxa.map((_,i)=>i).filter(i=>i!==enteroIdx).sort((a,b)=>total[b]-total[a]);
+  S.taxaOrder = enteroIdx>=0 ? [enteroIdx, ...rest] : rest;
   S.topTaxa=S.taxaOrder.slice(0,TOP_N).map(i=>taxa[i]);
 }
 
