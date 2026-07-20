@@ -7,17 +7,30 @@ const PAD_L = 8, PAD_R = 14, LANE_H = 22, ABX_AXIS_H = 20, COMP_AXIS_H = 20;
 const DOM_THRESH = 0.30;
 const MAX_HORIZON = 90;   // always forecast/scroll to the full horizon we offer
 const VIEW_DAYS = 45;     // days that fill the viewport at default zoom (scroll for the rest)
+const TOP_N = 15;         // genera named in the legend (ranked over the whole trajectory)
 
+// curated, biologically meaningful colours for the clinically salient genera
 const TAXA_COLOR = {
   'Enterococcus':'--tx-entero','Escherichia-Shigella':'--tx-enterobact','Serratia':'--tx-nonferm',
   'Streptococcus':'--tx-strep','Lactobacillus':'--tx-lacto','Staphylococcus':'--tx-staph',
   'Blautia':'--tx-blautia','Faecalibacterium':'--tx-faecali','Bacteroides':'--tx-bacteroides',
   'Akkermansia':'--tx-akkermansia','Bifidobacterium':'--tx-bifido',
   '[Clostridium] innocuum group':'--tx-innocuum',
-  'Other pathobionts':'--tx-pathobiont','Other':'--tx-other',
 };
 const cvar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
-const taxaColor = (t) => cvar(TAXA_COLOR[t] || '--tx-other');
+// Every genus is now named explicitly (no aggregated "Other"), so the long tail of
+// genera without a curated colour needs a stable, well-spread fill. Hash the name to
+// an HSL triple — deterministic (same genus → same colour across patients/reloads)
+// and distinct enough for the top-15 legend keys to be told apart.
+const _genusColor = {};
+function genusColor(name){
+  if(name in _genusColor) return _genusColor[name];
+  let h=2166136261>>>0;
+  for(let i=0;i<name.length;i++){ h=(h^name.charCodeAt(i))>>>0; h=(h*16777619)>>>0; }
+  const hue=h%360, sat=48+((h>>>9)%28), lit=42+((h>>>17)%18);
+  return (_genusColor[name]=`hsl(${hue} ${sat}% ${lit}%)`);
+}
+const taxaColor = (t) => (TAXA_COLOR[t] ? cvar(TAXA_COLOR[t]) : genusColor(t));
 
 // BSI (bloodstream-infection) event marker colours — vivid, high-contrast, and
 // deliberately distinct from the stacked-taxa fills underneath (both markers get
@@ -104,6 +117,9 @@ async function init(){
     const nl=clamp(a.scrollLeft + dx, 0, Math.max(0, a.scrollWidth - a.clientWidth));
     hScroll.forEach(sc=>{ sc.scrollLeft=nl; });
   }, {passive:false});
+  // deep-link: #p=<patientId> auto-opens that patient on load
+  const hp=(location.hash.match(/p=([^&]+)/)||[])[1];
+  if(hp){ const id=decodeURIComponent(hp); if(S.patients.some(p=>String(p.id)===id)) selectPatient(id); }
 }
 
 function toggleTheme(){
@@ -180,6 +196,7 @@ async function loadForecast(resetSchedule){
   S.fc = await api('/api/forecast',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body(S.schedule))});
   busy(false);
+  computeTaxaOrder();
   buildLegend(); buildObsLegend(); layout(); renderAll();
 }
 
@@ -229,10 +246,24 @@ function dayTicks(){
 // --------------------------------------------------------------------- //
 function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
 
+// Rank every genus by its contribution across the WHOLE forecast trajectory (area
+// under its band over all days t0..t0+horizon), independent of the readout day or
+// scroll position. Drives both the stacking order (largest at the bottom) and which
+// genera are named in the legend (top TOP_N). Stable while the user scrubs/scrolls.
+function computeTaxaOrder(){
+  const taxa=(S.fc&&S.fc.composition.taxa)||S.compTaxa||[];
+  const vals=S.fc&&S.fc.composition.values;
+  const total=taxa.map((_,i)=>{
+    let s=0; const col=vals&&vals[i]; if(col) for(let k=0;k<col.length;k++) s+=col[k];
+    return s;
+  });
+  S.taxaOrder=taxa.map((_,i)=>i).sort((a,b)=>total[b]-total[a]);
+  S.topTaxa=S.taxaOrder.slice(0,TOP_N).map(i=>taxa[i]);
+}
+
 function buildLegend(){
   const lg=$('compLegend'); lg.innerHTML='';
-  const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
-  taxa.forEach(t=>{
+  (S.topTaxa||[]).forEach(t=>{
     const d=document.createElement('span'); d.className='leg';
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
@@ -259,8 +290,7 @@ function appendBsiLegend(lg){
 
 function buildObsLegend(){
   const lg=$('obsLegend'); lg.innerHTML='';
-  const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
-  taxa.forEach(t=>{
+  (S.topTaxa||[]).forEach(t=>{
     const d=document.createElement('span'); d.className='leg';
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
@@ -325,8 +355,9 @@ function renderObserved(){
 // predicted view: stacked pNODE trajectory areas + dashed actual-regimen Entero trace
 function drawPredicted(g, y){
   const days=S.fc.day, vals=S.fc.composition.values, taxa=S.fc.composition.taxa;
+  const order=S.taxaOrder||taxa.map((_,i)=>i);   // largest-contributing genus first (bottom of stack)
   let cum=new Array(days.length).fill(0);
-  for(let ti=0; ti<taxa.length; ti++){
+  for(const ti of order){
     const upper=cum.map((c,i)=>c+vals[ti][i]);
     let d='M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(cum[i]).toFixed(1)}`).join('L');
     d+='L'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(upper[i]).toFixed(1)}`).reverse().join('L')+'Z';
@@ -347,11 +378,12 @@ function drawPredicted(g, y){
 // observed view: measured 16S composition as 1-day-thick stacked bars at each sample day
 function drawObservedBars(g, y){
   const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
+  const order=S.taxaOrder||taxa.map((_,i)=>i);   // same genus order as the trajectory stack
   const barW=Math.max(S.pxPerDay, 2);   // one day thick
   (S.observedComposition||[]).forEach(o=>{
     if(o.day<S.t0-0.5 || o.day>S.t0+S.horizon+0.5) return;
     const xc=xDay(o.day); let cum=0;
-    for(let ti=0; ti<taxa.length; ti++){
+    for(const ti of order){
       const v=o.values[ti]||0;
       if(v>1e-9){
         const yt=y(cum+v), yb=y(cum);

@@ -144,21 +144,30 @@
     return s;
   }
 
-  // composition band names, in stacked order (6 pathogens, aggregated pathobionts,
-  // commensals, Other) — matches TipnodeEngine.forecast's comp_taxa.
-  function compTaxaList() {
-    const dt = MODEL.display_taxa, NPATH = 6;
-    return dt.slice(0, NPATH).concat(['Other pathobionts'], dt.slice(NPATH), ['Other']);
+  // Composition band names: EVERY real genus, named explicitly (no "Other" /
+  // "Other pathobionts" aggregation). Non-biological model slots — <not present>
+  // and the <removed_class_*> placeholders (real_mask==0) — are dropped and the
+  // remaining genera renormalised to 1, so the stack still sums to full height.
+  // Order here is fixed (genus-panel order); app.js reorders for display by
+  // whole-trajectory contribution and keys only the top genera.
+  // lazily resolved (MODEL is null until ensureLoaded runs) and memoised
+  let _realIdx = null;
+  function realIdx() {
+    if (_realIdx) return _realIdx;
+    if (MODEL.real_idx) { _realIdx = MODEL.real_idx; return _realIdx; }
+    const r = []; for (let i = 0; i < MODEL.N; i++) if (!MODEL.real_mask || MODEL.real_mask[i]) r.push(i);
+    _realIdx = r; return r;
   }
-  // band values for a SINGLE composition vector (used for observed-sample bars)
+  function compTaxaList() {
+    return realIdx().map((i) => MODEL.genus_labels[i]);
+  }
+  // per-genus values for a SINGLE composition vector (observed-sample bars),
+  // renormalised over the real genera so they sum to 1
   function compBandsVec(y) {
-    const dt = MODEL.display_taxa, dIdx = MODEL.display_idx, NPATH = 6;
-    const out = []; let dispSum = 0;
-    for (let j = 0; j < NPATH; j++) { const v = y[dIdx[j]]; out.push(v); dispSum += v; }
-    const op = sumIdx(y, MODEL.pathobiont_extra_idx); out.push(op);
-    for (let j = NPATH; j < dt.length; j++) { const v = y[dIdx[j]]; out.push(v); dispSum += v; }
-    out.push(Math.max(1 - dispSum - op, 0));
-    return out;
+    const R = realIdx();
+    let s = 0; for (const i of R) s += y[i];
+    const inv = s > 0 ? 1 / s : 0;
+    return R.map((i) => y[i] * inv);
   }
 
   // ------------------------------------------------------------------- //
@@ -211,19 +220,16 @@
     const ds = [];
     for (let i = 0; i < ngrid; i += keep) ds.push(i);
 
-    // composition bands: 6 pathogen display taxa, aggregated "Other pathobionts",
-    // remaining display taxa (commensals), then neutral "Other".
-    const dt = MODEL.display_taxa, dIdx = MODEL.display_idx, NPATH = 6;
-    const compTaxa = dt.slice(0, NPATH).concat(['Other pathobionts'], dt.slice(NPATH), ['Other']);
+    // composition bands: every real genus, named explicitly and renormalised over
+    // the real genera (no aggregated "Other"/"Other pathobionts"). See compTaxaList.
+    const R = realIdx();
+    const compTaxa = compTaxaList();
     const values = compTaxa.map(() => []);
     for (const i of ds) {
       const yi = Y[i];
-      let dispSum = 0;
-      for (let j = 0; j < NPATH; j++) { const v = yi[dIdx[j]]; values[j].push(v); dispSum += v; }
-      const op = sumIdx(yi, MODEL.pathobiont_extra_idx);
-      values[NPATH].push(op);
-      for (let j = NPATH; j < dt.length; j++) { const v = yi[dIdx[j]]; values[j + 1].push(v); dispSum += v; }
-      values[compTaxa.length - 1].push(Math.max(1 - dispSum - op, 0));
+      let s = 0; for (const gi of R) s += yi[gi];
+      const inv = s > 0 ? 1 / s : 0;
+      for (let j = 0; j < R.length; j++) values[j].push(yi[R[j]] * inv);
     }
 
     const pick = (arr) => ds.map((i) => arr[i]);
