@@ -9,28 +9,90 @@ const MAX_HORIZON = 90;   // always forecast/scroll to the full horizon we offer
 const VIEW_DAYS = 45;     // days that fill the viewport at default zoom (scroll for the rest)
 const TOP_N = 15;         // genera named in the legend (ranked over the whole trajectory)
 
-// curated, biologically meaningful colours for the clinically salient genera
-const TAXA_COLOR = {
-  'Enterococcus':'--tx-entero','Escherichia-Shigella':'--tx-enterobact','Serratia':'--tx-nonferm',
-  'Streptococcus':'--tx-strep','Lactobacillus':'--tx-lacto','Staphylococcus':'--tx-staph',
-  'Blautia':'--tx-blautia','Faecalibacterium':'--tx-faecali','Bacteroides':'--tx-bacteroides',
-  'Akkermansia':'--tx-akkermansia','Bifidobacterium':'--tx-bifido',
-  '[Clostridium] innocuum group':'--tx-innocuum',
-};
 const cvar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
-// Every genus is now named explicitly (no aggregated "Other"), so the long tail of
-// genera without a curated colour needs a stable, well-spread fill. Hash the name to
-// an HSL triple — deterministic (same genus → same colour across patients/reloads)
-// and distinct enough for the top-15 legend keys to be told apart.
-const _genusColor = {};
-function genusColor(name){
-  if(name in _genusColor) return _genusColor[name];
-  let h=2166136261>>>0;
-  for(let i=0;i<name.length;i++){ h=(h^name.charCodeAt(i))>>>0; h=(h*16777619)>>>0; }
-  const hue=h%360, sat=48+((h>>>9)%28), lit=42+((h>>>17)%18);
-  return (_genusColor[name]=`hsl(${hue} ${sat}% ${lit}%)`);
+
+// ===================================================================== //
+//  Taxa colours & ordering — Xavier / MSKCC (Ying Taur `yingtools2`) method
+// ===================================================================== //
+// Colour is assigned by TAXONOMY, not by abundance. Every genus is mapped to a
+// palette GROUP keyed on its phylum / class / order / family, using the anchor
+// hues the Xavier lab uses (Enterococcus green, Proteobacteria red, Bacteroidia
+// teal, Lachnospiraceae salmon, Ruminococcaceae olive, other Clostridia tan,
+// Actinobacteria mauve …) — extended with a distinct hue per remaining class so
+// nothing collapses to grey. Within a group each member genus gets its own shade
+// (a light→dark ramp, a port of yingtools2 `shades()`), so related organisms read
+// as one colour family. Taxa are then STACKED in palette-group order so similar
+// colours sit adjacent, with one hard rule: Enterococcus (group 0) is always drawn
+// first — i.e. pinned to the very bottom of every stack.
+const TAXONOMY = {"Abiotrophia":["Firmicutes","Bacilli","Lactobacillales","Aerococcaceae"],"Achromobacter":["Proteobacteria","Gammaproteobacteria","Burkholderiales","Alcaligenaceae"],"Acidaminococcus":["Firmicutes","Negativicutes","Selenomonadales","Acidaminococcaceae"],"Actinomyces":["Actinobacteria","Actinobacteria","Actinomycetales","Actinomycetaceae"],"Adlercreutzia":["Actinobacteria","Coriobacteriia","Coriobacteriales","Eggerthellaceae"],"Agathobacter":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Akkermansia":["Verrucomicrobia","Verrucomicrobiae","Verrucomicrobiales","Akkermansiaceae"],"Alistipes":["Bacteroidetes","Bacteroidia","Bacteroidales","Rikenellaceae"],"Alloscardovia":["Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae"],"Anaerococcus":["Firmicutes","Clostridia","Clostridiales","Family XI"],"Anaerofustis":["Firmicutes","Clostridia","Clostridiales","Eubacteriaceae"],"Anaerostipes":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Atopobium":["Actinobacteria","Coriobacteriia","Coriobacteriales","Atopobiaceae"],"Bacteroides":["Bacteroidetes","Bacteroidia","Bacteroidales","Bacteroidaceae"],"Bifidobacterium":["Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae"],"Bilophila":["Proteobacteria","Deltaproteobacteria","Desulfovibrionales","Desulfovibrionaceae"],"Blautia":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Butyricicoccus":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Candidatus Stoquefichus":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Catabacter":["Firmicutes","Clostridia","Clostridiales","Catabacteraceae"],"Christensenellaceae R-7 group":["Firmicutes","Clostridia","Clostridiales","Christensenellaceae"],"Clostridioides":["Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae"],"Clostridium sensu stricto 1":["Firmicutes","Clostridia","Clostridiales","Clostridiaceae 1"],"Collinsella":["Actinobacteria","Coriobacteriia","Coriobacteriales","Coriobacteriaceae"],"Coprobacillus":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Coprococcus 3":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Corynebacterium":["Actinobacteria","Actinobacteria","Corynebacteriales","Corynebacteriaceae"],"Corynebacterium 1":["Actinobacteria","Actinobacteria","Corynebacteriales","Corynebacteriaceae"],"Cuneatibacter":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Cutibacterium":["Actinobacteria","Actinobacteria","Propionibacteriales","Propionibacteriaceae"],"DTU089":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Dialister":["Firmicutes","Negativicutes","Selenomonadales","Veillonellaceae"],"Dorea":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Eggerthella":["Actinobacteria","Coriobacteriia","Coriobacteriales","Eggerthellaceae"],"Eisenbergiella":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Enterococcus":["Firmicutes","Bacilli","Lactobacillales","Enterococcaceae"],"Erysipelatoclostridium":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Erysipelotrichaceae UCG-003":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Escherichia-Shigella":["Proteobacteria","Gammaproteobacteria","Enterobacterales","Enterobacteriaceae"],"Eubacterium":["Firmicutes","Clostridia","Clostridiales","Eubacteriaceae"],"F0332":["Bacteroidetes","Bacteroidia","Bacteroidales","Prevotellaceae"],"Faecalibacterium":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Faecalitalea":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Family XIII AD3011 group":["Firmicutes","Clostridia","Clostridiales","Family XIII"],"Finegoldia":["Firmicutes","Clostridia","Clostridiales","Family XI"],"Flavonifractor":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Fournierella":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Fusicatenibacter":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Fusobacterium":["Fusobacteria","Fusobacteriia","Fusobacteriales","Fusobacteriaceae"],"GCA-900066575":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Gemella":["Firmicutes","Bacilli","Bacillales","Gemellaceae"],"Haemophilus":["Proteobacteria","Gammaproteobacteria","Pasteurellales","Pasteurellaceae"],"Holdemanella":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Holdemania":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"Hungatella":["Firmicutes","Clostridia","Clostridiales","Clostridiaceae 1"],"Intestinibacter":["Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae"],"Lachnoanaerobaculum":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Lachnoclostridium":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Lachnospiraceae FCS020 group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Lachnospiraceae ND3007 group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Lachnospiraceae NK4A136 group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Lactobacillus":["Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae"],"Lactococcus":["Firmicutes","Bacilli","Lactobacillales","Streptococcaceae"],"Lactonifactor":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Leptotrichia":["Fusobacteria","Fusobacteriia","Fusobacteriales","Leptotrichiaceae"],"Leuconostoc":["Firmicutes","Bacilli","Lactobacillales","Leuconostocaceae"],"Marvinbryantia":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Megasphaera":["Firmicutes","Negativicutes","Selenomonadales","Veillonellaceae"],"Mogibacterium":["Firmicutes","Clostridia","Clostridiales","Family XIII"],"Negativibacillus":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Odoribacter":["Bacteroidetes","Bacteroidia","Bacteroidales","Marinifilaceae"],"Oribacterium":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Oscillibacter":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Parabacteroides":["Bacteroidetes","Bacteroidia","Bacteroidales","Tannerellaceae"],"Parascardovia":["Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae"],"Parasutterella":["Proteobacteria","Gammaproteobacteria","Burkholderiales","Sutterellaceae"],"Parvimonas":["Firmicutes","Clostridia","Clostridiales","Family XI"],"Pediococcus":["Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae"],"Peptoniphilus":["Firmicutes","Clostridia","Clostridiales","Family XI"],"Peptostreptococcus":["Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae"],"Phascolarctobacterium":["Firmicutes","Negativicutes","Selenomonadales","Acidaminococcaceae"],"Prevotella":["Bacteroidetes","Bacteroidia","Bacteroidales","Prevotellaceae"],"Prevotella 7":["Bacteroidetes","Bacteroidia","Bacteroidales","Prevotellaceae"],"Prevotella 9":["Bacteroidetes","Bacteroidia","Bacteroidales","Prevotellaceae"],"Propionibacterium":["Actinobacteria","Actinobacteria","Propionibacteriales","Propionibacteriaceae"],"Romboutsia":["Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae"],"Roseburia":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Rothia":["Actinobacteria","Actinobacteria","Micrococcales","Micrococcaceae"],"Ruminiclostridium":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminiclostridium 5":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminiclostridium 9":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae NK4A214 group":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae UCG-002":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae UCG-004":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae UCG-005":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae UCG-013":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcaceae UCG-014":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcus 1":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Ruminococcus 2":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Scardovia":["Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae"],"Sellimonas":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Serratia":["Proteobacteria","Gammaproteobacteria","Enterobacterales","Yersiniaceae"],"Shuttleworthia":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Staphylococcus":["Firmicutes","Bacilli","Bacillales","Staphylococcaceae"],"Stomatobaculum":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Streptococcus":["Firmicutes","Bacilli","Lactobacillales","Streptococcaceae"],"Subdoligranulum":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Terrisporobacter":["Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae"],"Turicibacter":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Turicibacteraceae"],"Tyzzerella":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"Tyzzerella 4":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"UBA1819":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"Veillonella":["Firmicutes","Negativicutes","Selenomonadales","Veillonellaceae"],"Weissella":["Firmicutes","Bacilli","Lactobacillales","Leuconostocaceae"],"[Clostridium] innocuum group":["Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae"],"[Eubacterium] brachy group":["Firmicutes","Clostridia","Clostridiales","Family XIII"],"[Eubacterium] coprostanoligenes group":["Firmicutes","Clostridia","Clostridiales","Ruminococcaceae"],"[Eubacterium] fissicatena group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"[Eubacterium] hallii group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"[Eubacterium] nodatum group":["Firmicutes","Clostridia","Clostridiales","Family XIII"],"[Eubacterium] ventriosum group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"[Ruminococcus] gauvreauii group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"[Ruminococcus] gnavus group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"],"[Ruminococcus] torques group":["Firmicutes","Clostridia","Clostridiales","Lachnospiraceae"]};
+
+// palette groups, in bottom→top stacking order. `test(taxon, genus)` is evaluated
+// top-to-bottom, first match wins (specific genus/family rules precede the broad
+// class/phylum fallbacks). taxon = [phylum, class, order, family].
+const PALETTE_GROUPS = [
+  { key:'Enterococcus',        anchor:'#129246', variation:0.15, test:(t,g)=> g==='Enterococcus' },
+  { key:'Streptococcus',       anchor:'#9FB846', variation:0.12, test:(t,g)=> g==='Streptococcus' },
+  { key:'Lactobacillus',       anchor:'#3B51A3', variation:0.12, test:(t,g)=> g==='Lactobacillus' },
+  { key:'Staphylococcus',      anchor:'#F1EB25', variation:0.12, test:(t,g)=> g==='Staphylococcus' },
+  { key:'Bacilli (other)',     anchor:'#8FBC8F', variation:0.30, test:(t)=> t[1]==='Bacilli' },
+  { key:'Gammaproteobacteria', anchor:'#EE2C2C', variation:0.38, test:(t)=> t[1]==='Gammaproteobacteria' },
+  { key:'Alphaproteobacteria', anchor:'#F0806C', variation:0.25, test:(t)=> t[1]==='Alphaproteobacteria' },
+  { key:'Deltaproteobacteria', anchor:'#AA336A', variation:0.25, test:(t)=> t[1]==='Deltaproteobacteria' },
+  { key:'Bacteroidia',         anchor:'#16C0B8', variation:0.34, test:(t)=> t[1]==='Bacteroidia' },
+  { key:'Lachnospiraceae',     anchor:'#EC9B96', variation:0.34, test:(t)=> t[3]==='Lachnospiraceae' },
+  { key:'Ruminococcaceae',     anchor:'#9AAE73', variation:0.34, test:(t)=> t[3]==='Ruminococcaceae' },
+  { key:'Clostridia (other)',  anchor:'#9C854E', variation:0.34, test:(t)=> t[1]==='Clostridia' },
+  { key:'Negativicutes',       anchor:'#653F99', variation:0.28, test:(t)=> t[1]==='Negativicutes' },
+  { key:'Erysipelotrichia',    anchor:'#F5911E', variation:0.28, test:(t)=> t[1]==='Erysipelotrichia' },
+  { key:'Actinobacteria',      anchor:'#A77097', variation:0.34, test:(t)=> t[0]==='Actinobacteria' },
+  { key:'Verrucomicrobiae',    anchor:'#CA0BE8', variation:0.20, test:(t)=> t[1]==='Verrucomicrobiae' },
+  { key:'Fusobacteriia',       anchor:'#E24AA0', variation:0.22, test:(t)=> t[1]==='Fusobacteriia' },
+  { key:'Other',               anchor:'#9AA0A6', variation:0.28, test:()=> true },
+];
+const OTHER_GROUP = PALETTE_GROUPS.length - 1;
+function groupIndexOf(genus){
+  const t = TAXONOMY[genus] || ['','','',''];
+  for(let i=0;i<PALETTE_GROUPS.length;i++){ if(PALETTE_GROUPS[i].test(t, genus)) return i; }
+  return OTHER_GROUP;
 }
-const taxaColor = (t) => (TAXA_COLOR[t] ? cvar(TAXA_COLOR[t]) : genusColor(t));
+
+// hex helpers + a faithful port of yingtools2::shades(): expand one anchor colour
+// into `n` evenly-spaced shades from a lightened end (`variation` toward white),
+// through the anchor, to a darkened end (`variation` toward black).
+function _hex2rgb(h){ h=h.replace('#',''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+function _rgb2hex(c){ return '#'+c.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join(''); }
+function _mix(a,b,t){ return a.map((v,i)=>v+(b[i]-v)*t); }
+function shades(anchor, n, variation){
+  if(n<=1) return [anchor];
+  const base=_hex2rgb(anchor), white=_mix(base,[255,255,255],variation), black=_mix(base,[0,0,0],variation);
+  const out=[];
+  for(let i=0;i<n;i++){
+    const t=i/(n-1);                       // 0 (lightest) → 1 (darkest)
+    out.push(_rgb2hex(t<0.5 ? _mix(white,base,t/0.5) : _mix(base,black,(t-0.5)/0.5)));
+  }
+  return out;
+}
+
+// Precompute, over the fixed set of real genera, each genus's palette group and its
+// distinct within-group shade (members ordered by name → a stable light→dark ramp).
+// Memoised on the taxa-list identity so colours never shift while scrubbing.
+let _colorTaxaKey=null, _taxaColor={}, _taxaGroup={};
+function ensureTaxaColors(taxa){
+  if(!taxa || !taxa.length || _colorTaxaKey===taxa.length) return;
+  _colorTaxaKey=taxa.length; _taxaColor={}; _taxaGroup={};
+  const byGroup={};
+  taxa.forEach(g=>{ const gi=groupIndexOf(g); _taxaGroup[g]=gi; (byGroup[gi]||(byGroup[gi]=[])).push(g); });
+  Object.keys(byGroup).forEach(gi=>{
+    const members=byGroup[gi].slice().sort((a,b)=>a.localeCompare(b));
+    const grp=PALETTE_GROUPS[gi], sh=shades(grp.anchor, members.length, grp.variation);
+    members.forEach((g,i)=> _taxaColor[g]=sh[i]);
+  });
+}
+function taxaColor(t){
+  if(_taxaColor[t]) return _taxaColor[t];
+  const g=PALETTE_GROUPS[groupIndexOf(t)];
+  return shades(g.anchor,1,g.variation)[0];
+}
 
 // BSI (bloodstream-infection) event marker colours — vivid, high-contrast, and
 // deliberately distinct from the stacked-taxa fills underneath (both markers get
@@ -246,24 +308,28 @@ function dayTicks(){
 // --------------------------------------------------------------------- //
 function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
 
-// Rank every genus by its contribution across the WHOLE forecast trajectory (area
-// under its band over all days t0..t0+horizon), independent of the readout day or
-// scroll position. Drives both the stacking order (largest at the bottom) and which
-// genera are named in the legend (top TOP_N). Stable while the user scrubs/scrolls.
-// Enterococcus is forced to the very bottom of the stack (ahead of the rank sort) so
-// its band's top edge sits at the same y as its raw value, letting it be compared
-// directly against the dashed actual-regimen Entero trace drawn from the axis.
+// Order the genera for stacking by TAXONOMY (Xavier/MSKCC convention), not abundance:
+// palette-group order, then genus name within a group, so same-colour relatives stack
+// contiguously. Enterococcus (palette group 0) therefore sorts first — pinned to the
+// very bottom of every stack (the one hard rule, needed so its band's top edge is
+// directly comparable to the dashed actual-regimen Entero trace drawn from the axis).
+// Abundance is used only to choose WHICH genera the legend names (the top TOP_N),
+// which are then listed in stack order. Stable while the user scrubs/scrolls.
 function computeTaxaOrder(){
   const taxa=(S.fc&&S.fc.composition.taxa)||S.compTaxa||[];
   const vals=S.fc&&S.fc.composition.values;
+  ensureTaxaColors(taxa);
   const total=taxa.map((_,i)=>{
     let s=0; const col=vals&&vals[i]; if(col) for(let k=0;k<col.length;k++) s+=col[k];
     return s;
   });
-  const enteroIdx=taxa.indexOf('Enterococcus');
-  const rest=taxa.map((_,i)=>i).filter(i=>i!==enteroIdx).sort((a,b)=>total[b]-total[a]);
-  S.taxaOrder = enteroIdx>=0 ? [enteroIdx, ...rest] : rest;
-  S.topTaxa=S.taxaOrder.slice(0,TOP_N).map(i=>taxa[i]);
+  S.taxaOrder=taxa.map((_,i)=>i).sort((a,b)=>{
+    const ga=_taxaGroup[taxa[a]], gb=_taxaGroup[taxa[b]];
+    if(ga!==gb) return ga-gb;                 // palette-group order (Enterococcus first)
+    return taxa[a].localeCompare(taxa[b]);    // then genus name within the colour family
+  });
+  const topSet=new Set(taxa.map((_,i)=>i).sort((a,b)=>total[b]-total[a]).slice(0,TOP_N));
+  S.topTaxa=S.taxaOrder.filter(i=>topSet.has(i)).map(i=>taxa[i]);
 }
 
 function buildLegend(){
@@ -371,7 +437,7 @@ function enteroBand(fc){
 // predicted view: stacked pNODE trajectory areas + dashed actual-regimen Entero trace
 function drawPredicted(g, y){
   const days=S.fc.day, vals=S.fc.composition.values, taxa=S.fc.composition.taxa;
-  const order=S.taxaOrder||taxa.map((_,i)=>i);   // largest-contributing genus first (bottom of stack)
+  const order=S.taxaOrder||taxa.map((_,i)=>i);   // taxonomic order; Enterococcus first (bottom of stack)
   let cum=new Array(days.length).fill(0);
   for(const ti of order){
     const upper=cum.map((c,i)=>c+vals[ti][i]);
@@ -394,7 +460,7 @@ function drawPredicted(g, y){
 // observed view: measured 16S composition as 1-day-thick stacked bars at each sample day
 function drawObservedBars(g, y){
   const taxa=(S.compTaxa)||(S.fc&&S.fc.composition.taxa)||[];
-  const order=S.taxaOrder||taxa.map((_,i)=>i);   // same genus order as the trajectory stack
+  const order=S.taxaOrder||taxa.map((_,i)=>i);   // same taxonomic genus order as the trajectory stack
   const barW=Math.max(S.pxPerDay, 2);   // one day thick
   (S.observedComposition||[]).forEach(o=>{
     if(o.day<S.t0-0.5 || o.day>S.t0+S.horizon+0.5) return;
