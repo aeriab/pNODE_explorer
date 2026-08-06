@@ -13,7 +13,7 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3; /* Clostridia / Bacteroidia */
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E; /* Verrucomicrobiae / Actinobacteria / Erysipelotrichia */
   --tx-pathobiont:#AA336A; --tx-other:#808080;                          /* Deltaproteobacteria (misc) / removed_taxa */
-  --flow:#ff3ec8;
+  --flow:#8a8a86;
 }
 .viz-root[data-theme="light"]{
   color-scheme: light;
@@ -28,7 +28,7 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3;
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E;
   --tx-pathobiont:#AA336A; --tx-other:#808080;
-  --flow:#d6009e;
+  --flow:#4a4a48;
 }
 
 *{box-sizing:border-box}
@@ -57,9 +57,9 @@ button.ghost{background:transparent}
 button.ghost:hover{background:var(--panel);border-color:var(--accent)}
 button.sm{padding:5px 9px;font-size:12px}
 #themeBtn{font-size:16px;padding:6px 10px}
-.tutorial-btn{font-size:13px;font-weight:650;padding:8px 13px;border-color:var(--accent2);
-  color:var(--accent2)}
-.tutorial-btn:hover{background:color-mix(in srgb,var(--accent2) 14%,transparent)}
+.tutorial-btn{font-size:13px;font-weight:650;padding:8px 13px;border-color:var(--accent);
+  color:var(--accent)}
+.tutorial-btn:hover{background:color-mix(in srgb,var(--accent) 14%,transparent)}
 
 .combo{position:relative}
 .combo input{width:210px}
@@ -153,6 +153,11 @@ button.sm{padding:5px 9px;font-size:12px}
 .perturb-item:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .perturb-item input{cursor:pointer;accent-color:var(--accent2);margin:0}
 .perturb-swatch{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+/* the "match administered" row reuses .perturb-item's layout but is visually
+   set apart (bold, divider, blue accent) — these rules must come AFTER
+   .perturb-item/.perturb-item input above to win the equal-specificity cascade */
+.perturb-match{font-weight:650;padding:3px 3px 8px;margin-bottom:6px;border-bottom:1px solid var(--border)}
+.perturb-match input{accent-color:var(--accent)}
 @keyframes tu-pulse{0%{r:11px;opacity:.55}70%{r:22px;opacity:0}100%{r:22px;opacity:0}}
 .tu-dot-halo{animation:tu-pulse 1.8s ease-out infinite}
 /* the readout dot can be grabbed and slid along the predicted path */

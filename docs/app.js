@@ -112,7 +112,8 @@ const S = {
   observedComposition:[], compTaxa:null, bsiEvents:[],
   fc:null, baseFc:null, readoutDay:14,
   pxPerDay:18, plotW:0, scrollPx:0,
-  flowOn:false, perturbations:{},
+  flowOn:false, perturbations:{}, matchAdministered:false,
+  tuZoom:1, tuPan:{x:0,y:0},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -163,6 +164,7 @@ async function init(){
   setupCompTooltip();
   setupScrollSync();
   setupFlowControls();
+  setupTaxumapZoom();
   setupTutorial();
   // deep-link: #p=<patientId> auto-opens that patient on load (used by the
   // tutorial's "search for a patient" step, and shareable links in general);
@@ -603,15 +605,25 @@ function renderTaxumap(){
   // legend + path both depend on the current patient's forecast (and BSI events)
   if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); drawTaxumapLegend(); }
   taxumapMoveDot();
-  drawFlowField();
-  $('tuHint').textContent='drag the ● (or the readout cursor elsewhere) to move along the predicted path';
+  syncPerturbToAdministered();
+  drawFlowField(false);
+  $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom';
 }
 
+// _tuBase holds the fixed "fit the whole reference cloud" transform (zoom=1,
+// pan=0). The live map() below composes it with S.tuZoom/S.tuPan (persisted
+// on S so a container resize doesn't reset the user's zoom level) so every
+// consumer (backdrop, path, dot, flow field) sees one consistent transform.
+let _tuBase=null;
 function setupTaxumapMap(w,h){
   const info=TAXUMAP.info(); const [xmin,xmax,ymin,ymax]=info.bounds;
   const m=26, s=Math.min((w-2*m)/(xmax-xmin),(h-2*m)/(ymax-ymin));
   const offx=(w-s*(xmax-xmin))/2, offy=(h-s*(ymax-ymin))/2;
-  const map=(x,y)=>[offx+(x-xmin)*s, h-(offy+(y-ymin)*s)];    // invert y for screen
+  _tuBase={xmin,xmax,ymin,ymax,s,offx,offy,w,h};
+  const map=(x,y)=>{
+    const bx=offx+(x-xmin)*s, by=h-(offy+(y-ymin)*s);         // zoom=1 baseline (invert y for screen)
+    return [S.tuPan.x+bx*S.tuZoom, S.tuPan.y+by*S.tuZoom];
+  };
   const dpr=Math.min(window.devicePixelRatio||1, 2);
   const cv=$('taxumapCanvas'); cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr);
   cv.style.width=w+'px'; cv.style.height=h+'px';
@@ -621,6 +633,53 @@ function setupTaxumapMap(w,h){
   svg.appendChild(el('text',{x:w-8,y:h-7,'text-anchor':'end',fill:cvar('--muted'),'font-size':10},[txt('TaxUMAP-1 →')]));
   svg.appendChild(el('text',{x:11,y:15,fill:cvar('--muted'),'font-size':10},[txt('↑ TaxUMAP-2')]));
   _tu={w,h,dpr,map,fc:null};
+}
+
+// screen (x,y) -> data-space coords, inverse of the map() above; used only to
+// work out which slice of the reference cloud is currently on screen so the
+// flow field can sample it at the right density (see visibleDataBounds)
+function tuInvert(sx,sy){
+  const b=_tuBase; if(!b) return [0,0];
+  const bx=(sx-S.tuPan.x)/S.tuZoom, by=(sy-S.tuPan.y)/S.tuZoom;
+  return [ b.xmin+(bx-b.offx)/b.s, b.ymin+((b.h-by)-b.offy)/b.s ];
+}
+function visibleDataBounds(){
+  const b=_tuBase; if(!b) return null;
+  const a=tuInvert(0,0), c=tuInvert(b.w,b.h);
+  return [ Math.max(b.xmin,Math.min(a[0],c[0])), Math.min(b.xmax,Math.max(a[0],c[0])),
+           Math.max(b.ymin,Math.min(a[1],c[1])), Math.min(b.ymax,Math.max(a[1],c[1])) ];
+}
+
+// mouse-wheel zoom, centred on the cursor (same feel as a map app): redraw
+// the backdrop/path/dot immediately (cheap) on every tick, but only
+// recompute the flow field's sample points/vectors (the expensive part)
+// once scrolling settles, at whatever resolution the new zoom level implies.
+let _tuZoomRAF=null, _tuFlowSettleT=null;
+function setupTaxumapZoom(){
+  const wrap=$('taxumapWrap');
+  wrap.addEventListener('wheel',(e)=>{
+    if(!_tu||!_tuBase) return;
+    e.preventDefault(); e.stopPropagation();
+    const r=wrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    const oldZoom=S.tuZoom;
+    const factor=Math.exp(-e.deltaY*0.0016);
+    const newZoom=clamp(oldZoom*factor, 1, 14);
+    if(newZoom===oldZoom) return;
+    // keep the data point under the cursor fixed on screen while zooming
+    S.tuPan.x = mx - (mx-S.tuPan.x)/oldZoom*newZoom;
+    S.tuPan.y = my - (my-S.tuPan.y)/oldZoom*newZoom;
+    S.tuZoom = newZoom;
+    if(_tuZoomRAF) cancelAnimationFrame(_tuZoomRAF);
+    _tuZoomRAF=requestAnimationFrame(()=>{
+      drawTaxumapBackdrop(); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(true);
+    });
+    clearTimeout(_tuFlowSettleT);
+    _tuFlowSettleT=setTimeout(()=>{ if(isExpanded('tuPanel')) drawFlowField(false); }, 160);
+  }, {passive:false});
+  wrap.addEventListener('dblclick', ()=>{
+    S.tuZoom=1; S.tuPan={x:0,y:0};
+    if(isExpanded('tuPanel')){ drawTaxumapBackdrop(); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(false); }
+  });
 }
 
 function drawTaxumapBackdrop(){
@@ -746,25 +805,29 @@ function drawTaxumapLegend(){
 //  at where the model predicts it would end up.
 // --------------------------------------------------------------------- //
 const FLOW_DT = 7;            // days of constant exposure integrated per arrow
-const FLOW_GRID = 24;         // spatial bins per axis when sampling reference points
-const FLOW_ARROW_PX = 15;     // fixed on-screen arrow length (direction matters, not raw magnitude)
-const FLOW_MIN_DRIFT = 1e-3;  // skip arrows for points the model predicts won't move (data-space units)
+const FLOW_GRID = 22;         // spatial bins per axis, across whatever is currently VISIBLE —
+                               // zooming in shrinks the visible data extent, so the same grid
+                               // count packs into a smaller area: finer real detail, same on-
+                               // screen density, exactly like map-tile LOD.
+const FLOW_ARROW_PX = 17;     // fixed on-screen line length (direction matters, not raw magnitude)
+const FLOW_MIN_DRIFT = 1e-3;  // skip lines for points the model predicts won't move (data-space units)
+const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each tapered flow line
 
-let _flowPoints=null;         // cached {r, x, y}[] — spatial subsample of TaxUMAP reference indices
-function pickFlowSamplePoints(info){
-  if(_flowPoints) return _flowPoints;
-  const [xmin,xmax,ymin,ymax]=info.bounds;
+// spatial subsample of TaxUMAP reference indices, one per grid cell, restricted
+// to `bounds` (the currently visible data-space region — see visibleDataBounds)
+function pickFlowSamplePoints(info, bounds){
+  const [xmin,xmax,ymin,ymax]=bounds;
   const cellW=(xmax-xmin)/FLOW_GRID||1, cellH=(ymax-ymin)/FLOW_GRID||1;
   const chosen=new Map();
   for(let r=0;r<info.nRef;r++){
     const x=info.knnCoords[2*r], y=info.knnCoords[2*r+1];
+    if(x<xmin||x>xmax||y<ymin||y>ymax) continue;
     const cx=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((x-xmin)/cellW)));
     const cy=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((y-ymin)/cellH)));
     const key=cx*FLOW_GRID+cy;
     if(!chosen.has(key)) chosen.set(key,r);   // first reference point claims each cell
   }
-  _flowPoints=[...chosen.values()];
-  return _flowPoints;
+  return [...chosen.values()];
 }
 
 let _flowCache={key:null, vectors:null};
@@ -773,14 +836,16 @@ function activePerturbationSchedule(){
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
   return sched;
 }
-function computeFlowField(){
+function computeFlowField(bounds){
   if(!window.TAXUMAP || !TAXUMAP.ready() || !window.__tipnodeForecast) return null;
   const N = S.fc && S.fc.fullComp && S.fc.fullComp[0] ? S.fc.fullComp[0].length : null;
   if(!N) return null;
-  const key = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
+  const pkey = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
+  const bkey = bounds.map(v=>v.toFixed(3)).join(',');
+  const key = pkey+'|'+bkey;
   if(_flowCache.key===key && _flowCache.vectors) return _flowCache.vectors;
   const info = TAXUMAP.info();
-  const idxs = pickFlowSamplePoints(info);
+  const idxs = pickFlowSamplePoints(info, bounds);
   const schedule = activePerturbationSchedule();
   const vectors=[];
   for(const r of idxs){
@@ -800,45 +865,120 @@ function computeFlowField(){
   return vectors;
 }
 
+// spatially smooth each vector's direction against its neighbours (inverse-
+// distance weighted) so the field reads as one continuous flow rather than
+// independent arrows — this is the "averaging" that gives streamlines their
+// coherent look, and is recomputed alongside the vectors themselves.
+function smoothFlowDirections(vectors){
+  return vectors.map(([x0,y0,x1,y1],i)=>{
+    let wx=0, wy=0, wsum=0;
+    for(let j=0;j<vectors.length;j++){
+      const [ox0,oy0,ox1,oy1]=vectors[j];
+      const d=Math.hypot(ox0-x0,oy0-y0);
+      const w=1/(1+d*d*36);           // ~falls off within a couple grid cells
+      const odx=ox1-ox0, ody=oy1-oy0, ol=Math.hypot(odx,ody)||1e-9;
+      wx+=w*odx/ol; wy+=w*ody/ol; wsum+=w;
+    }
+    const l=Math.hypot(wx,wy)||1e-9;
+    return [wx/l, wy/l];   // smoothed unit direction
+  });
+}
+
 function clearFlowCanvas(){
   const cv=$('flowCanvas'); if(!cv||!_tu) return;
   const ctx=cv.getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0); ctx.clearRect(0,0,_tu.w,_tu.h);
 }
-function drawFlowField(){
+
+// a smooth, tapered "flow line" (thick at the base, narrowing to a point at
+// the tip, gently bowed) rather than a straight vector arrow — the shape is
+// a filled ribbon traced along a quadratic curve through p0/p1.
+function drawTaperedFlowLine(ctx, p0, p1, baseWidth, bow){
+  const dx=p1[0]-p0[0], dy=p1[1]-p0[1], len=Math.hypot(dx,dy);
+  if(len<0.5) return;
+  const nx=-dy/len, ny=dx/len;
+  const midx=(p0[0]+p1[0])/2+nx*bow*len, midy=(p0[1]+p1[1])/2+ny*bow*len;
+  const N=9, left=[], right=[];
+  for(let i=0;i<=N;i++){
+    const t=i/N, mt=1-t;
+    const bx=mt*mt*p0[0]+2*mt*t*midx+t*t*p1[0];
+    const by=mt*mt*p0[1]+2*mt*t*midy+t*t*p1[1];
+    const tx=2*mt*(midx-p0[0])+2*t*(p1[0]-midx);
+    const ty=2*mt*(midy-p0[1])+2*t*(p1[1]-midy);
+    const tl=Math.hypot(tx,ty)||1, pnx=-ty/tl, pny=tx/tl;
+    const w=baseWidth*0.5*Math.pow(1-t,0.8);
+    left.push([bx+pnx*w, by+pny*w]); right.push([bx-pnx*w, by-pny*w]);
+  }
+  ctx.beginPath();
+  ctx.moveTo(left[0][0],left[0][1]);
+  for(let i=1;i<left.length;i++) ctx.lineTo(left[i][0],left[i][1]);
+  for(let i=right.length-1;i>=0;i--) ctx.lineTo(right[i][0],right[i][1]);
+  ctx.closePath(); ctx.fill();
+}
+
+// draws the current flow field. `fromCache`=true (used while a zoom gesture
+// is still in flight) re-projects whatever vectors are already cached at the
+// current pan/zoom instead of recomputing them, so panning/zooming stays
+// smooth; the real recompute at the new resolution happens once it settles.
+function drawFlowField(fromCache){
   clearFlowCanvas();
   if(!S.flowOn || !_tu) return;
-  const vectors=computeFlowField();
-  const cv=$('flowCanvas'); if(!vectors||!cv) return;
+  const bounds = fromCache && _flowCache.vectors ? null : visibleDataBounds();
+  const vectors = fromCache && _flowCache.vectors ? _flowCache.vectors : computeFlowField(bounds);
+  const cv=$('flowCanvas'); if(!vectors||!cv||!vectors.length) return;
+  const dirs=smoothFlowDirections(vectors);
   const ctx=cv.getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
-  ctx.strokeStyle=cvar('--flow'); ctx.fillStyle=cvar('--flow'); ctx.lineWidth=1.3;
+  ctx.fillStyle=cvar('--flow');
   // raw (unnormalised) screen-space drift lengths, for a mild magnitude cue via opacity
   const raw=vectors.map(([x0,y0,x1,y1])=>{
     const a=_tu.map(x0,y0), b=_tu.map(x1,y1); return Math.hypot(b[0]-a[0],b[1]-a[1]);
   });
   const maxRaw=Math.max(1e-6, ...raw);
-  vectors.forEach(([x0,y0,x1,y1],i)=>{
-    const p0=_tu.map(x0,y0), p1=_tu.map(x1,y1);
-    const dx=p1[0]-p0[0], dy=p1[1]-p0[1], len=Math.hypot(dx,dy);
-    if(len<0.5) return;
-    const ux=dx/len, uy=dy/len;
-    const ex=p0[0]+ux*FLOW_ARROW_PX, ey=p0[1]+uy*FLOW_ARROW_PX;
-    ctx.globalAlpha=clamp(0.35+0.65*(raw[i]/maxRaw), 0.35, 0.95);
-    ctx.beginPath(); ctx.moveTo(p0[0],p0[1]); ctx.lineTo(ex,ey); ctx.stroke();
-    const ang=Math.atan2(dy,dx), ah=4.2;
-    ctx.beginPath(); ctx.moveTo(ex,ey);
-    ctx.lineTo(ex-ah*Math.cos(ang-0.5), ey-ah*Math.sin(ang-0.5));
-    ctx.lineTo(ex-ah*Math.cos(ang+0.5), ey-ah*Math.sin(ang+0.5));
-    ctx.closePath(); ctx.fill();
+  vectors.forEach(([x0,y0],i)=>{
+    const p0=_tu.map(x0,y0);
+    const [ux,uy]=dirs[i];
+    const p1=[p0[0]+ux*FLOW_ARROW_PX, p0[1]+uy*FLOW_ARROW_PX];
+    // bow direction/magnitude comes from how much smoothing bent this line
+    // away from its own raw drift — a small, organic curve, not noise
+    const rawDx=vectors[i][2]-x0, rawDy=vectors[i][3]-y0, rawLen=Math.hypot(rawDx,rawDy)||1e-9;
+    const cross=(rawDx/rawLen)*uy-(rawDy/rawLen)*ux;
+    ctx.globalAlpha=clamp(0.3+0.65*(raw[i]/maxRaw), 0.3, 0.9);
+    drawTaperedFlowLine(ctx, p0, p1, FLOW_MAX_WIDTH, clamp(cross*0.35,-0.22,0.22));
   });
   ctx.globalAlpha=1;
+}
+
+// current antibiotic classes active in S.schedule at day `day` (interval-membership test)
+function administeredAt(day){
+  const set={};
+  (S.abxOrder||[]).forEach(cat=>{
+    const ivs=S.schedule[cat]||[];
+    set[cat]=ivs.some(([s,e])=> day>=s-1e-6 && day<=e+1e-6);
+  });
+  return set;
+}
+// when "Match antibiotics administered" is on, keeps the Perturbations
+// checklist locked to whatever the patient is actually receiving at the
+// current readout day — called on every taxUMAP render (readout drag,
+// schedule edit, patient/sample switch), so it tracks the dotted cursor live.
+function syncPerturbToAdministered(){
+  if(!S.matchAdministered) return;
+  const set=administeredAt(S.readoutDay);
+  const list=$('perturbList');
+  Object.keys(set).forEach(cat=>{
+    S.perturbations[cat]=set[cat];
+    const input=list&&list.querySelector(`input[data-cat="${cat}"]`);
+    if(input) input.checked=set[cat];
+  });
 }
 
 // "Show flow lines" toggle + the "Perturbations" antibiotic checklist under it.
 // The perturbation set is independent of the antibiotic-timeline editor: it
 // drives ONLY the map-wide flow field (a constant, sustained-exposure query
-// against the model), not the current patient's own forecast.
+// against the model), not the current patient's own forecast — unless
+// "Match antibiotics administered" is checked, which instead drives the
+// checklist FROM the patient's live schedule at the current readout day.
 function buildPerturbList(){
   const list=$('perturbList'); if(!list || list.childElementCount) return;   // build once
   const cats=(S.abxOrder||[]).slice().sort((a,b)=>abxLabel(a).localeCompare(abxLabel(b)));
@@ -847,17 +987,28 @@ function buildPerturbList(){
     const lab=document.createElement('label'); lab.className='perturb-item';
     lab.innerHTML=`<input type="checkbox" data-cat="${cat}"><span class="perturb-swatch" style="background:${cvar('--flow')}"></span>${abxLabel(cat)}`;
     lab.querySelector('input').addEventListener('change',(e)=>{
-      S.perturbations[cat]=e.target.checked;
-      if(S.fc) renderTaxumap();
+      // reflect the checkbox instantly; defer the (expensive) recompute one
+      // tick so the browser paints the toggle before the heavy work runs
+      const checked=e.target.checked;
+      if(S.matchAdministered){ S.matchAdministered=false; $('perturbMatchToggle').checked=false; }
+      setTimeout(()=>{ S.perturbations[cat]=checked; if(S.fc) renderTaxumap(); },0);
     });
     list.appendChild(lab);
   });
 }
 function setupFlowControls(){
   $('flowToggle').addEventListener('change',(e)=>{
-    S.flowOn=e.target.checked;
-    $('perturbPanel').classList.toggle('hidden', !S.flowOn);
-    if(S.fc) renderTaxumap();
+    const checked=e.target.checked;
+    $('perturbPanel').classList.toggle('hidden', !checked);
+    setTimeout(()=>{ S.flowOn=checked; if(S.fc) renderTaxumap(); },0);
+  });
+  $('perturbMatchToggle').addEventListener('change',(e)=>{
+    const checked=e.target.checked;
+    setTimeout(()=>{
+      S.matchAdministered=checked;
+      if(S.matchAdministered) syncPerturbToAdministered();
+      if(S.fc) renderTaxumap();
+    },0);
   });
 }
 
@@ -1095,27 +1246,21 @@ const TUT = { steps:[], idx:0, active:false, waitTimer:null, reflow:null };
 function tutorialSteps(){
   const targetPid = String(S.pid)==='557' ? '780' : '557';
   return [
-    { title:'Welcome to the pNODE Explorer', body:
-      `This tool forecasts how an allo-HCT patient's gut microbiome composition will change under different antibiotic regimens. This short tour walks through every panel, top to bottom — click <b>Next</b> to begin.` },
     { target:'#patientCtl', focus:'#patientSearch', title:'Find a patient', body:
-      `Type an ID here to switch patients. <b>Try it:</b> search for and select patient <b>${targetPid}</b>.`,
-      waitFor:()=>String(S.pid)===targetPid, waitHint:`Waiting for you to open patient ${targetPid}…`, doneHint:'Nice — moved on.' },
+      `Search for and open patient <b>${targetPid}</b> to continue.`,
+      waitFor:()=>String(S.pid)===targetPid, waitHint:`Waiting for you to open patient ${targetPid}…`, doneHint:'Moved on.' },
     { target:'#sampleCtl', title:'16S sample', body:
-      `Every patient has one or more real stool samples. The forecast always starts from whichever sample is selected here — switching it re-runs the model from that day forward.` },
-    { target:'#themeBtn', title:'Light / dark', body:
-      `Toggles the color theme. Every chart, including the taxa palette, adapts automatically.` },
+      `The forecast starts from whichever real stool sample is selected here.` },
     { target:'#trajPanel', title:'Predicted microbiome composition', body:
-      `The pNODE model's forecast: every genus stacked from the selected sample onward. The bold, glowing dark-green line is <b>Enterococcus BSI risk</b> — a ${enteroRiskWindowDays()}-day trailing mean of predicted Enterococcus abundance, so it climbs when Enterococcus is high and falls when it's low. Click or drag anywhere on the chart to move the readout cursor (the dotted line).` },
-    { target:'#obsPanel', expand:'obsPanel', title:'Observed microbiome composition', body:
-      `The patient's actual measured 16S samples, plotted on the same day axis as the forecast, so you can compare prediction against reality.` },
+      `The glowing green line tracks the ${enteroRiskWindowDays()}-day trailing mean of predicted Enterococcus abundance, the model's bloodstream-infection risk signal.` },
+    { target:'#obsPanel', title:'Observed microbiome composition', body:
+      `These are the patient's actual measured 16S samples, on the same day axis as the forecast.` },
     { target:'#abxPanel', title:'Antibiotic timeline', body:
-      `Drag on a lane to add a course of that drug class; click a bar to remove it. Every edit immediately re-runs the forecast. <b>Try it:</b> drag on an empty lane, then use <b>Reset to actual regimen</b> to undo it. This chart, the two composition charts above, and the taxUMAP below all share one day axis — scroll any one of them and the others scroll with it.` },
-    { target:'#tuPanel', expand:'tuPanel', title:'TaxUMAP community map', body:
-      `A fixed 2-D map of community types, built from thousands of real samples. The bright dot is the forecast's current position; drag it (or the readout cursor elsewhere) to walk it along the predicted path.` },
-    { target:'#flowToggleLbl', expand:'tuPanel', title:'Flow lines & perturbations', body:
-      `Turn on <b>Show flow lines</b> to reveal a map-wide arrow field showing where the model predicts communities drift under sustained antibiotic exposure — independent of the current patient. With nothing checked it shows natural drift with no antibiotics; check boxes under <b>Perturbations</b> to see how each drug class reshapes that flow.` },
-    { title:"That's the tour", body:
-      `Reopen this any time from the <b>Tutorial</b> button at the top of the screen. Go explore a patient.` },
+      `Drag on a lane to add a course of that drug class, or click a bar to remove one.` },
+    { target:'#tuPanel', title:'TaxUMAP community map', body:
+      `This map shows community types from thousands of real samples, with the dot marking this forecast's current position.` },
+    { target:'#flowToggleLbl', title:'Flow lines and perturbations', body:
+      `Checked drug classes show where the model predicts communities drift under sustained exposure to them.` },
   ];
 }
 
@@ -1131,8 +1276,10 @@ function tutorialRenderStep(){
   const hint=$('tutActionHint');
   if(step.waitFor){ hint.textContent=step.waitHint||''; hint.classList.remove('hidden'); }
   else hint.classList.add('hidden');
-  if(step.expand){ const p=$(step.expand); if(p && p.classList.contains('collapsed')) p.querySelector('.panel-toggle').click(); }
   const target = step.target ? document.querySelector(step.target) : null;
+  // auto-open whichever panel this step lives in, if it's currently collapsed
+  const panel = target && target.closest('.panel');
+  if(panel && panel.classList.contains('collapsed')) panel.querySelector('.panel-toggle').click();
   if(target) target.scrollIntoView({block:'center', behavior:'instant'});
   if(step.focus){ const f=document.querySelector(step.focus); if(f) f.focus(); }
   requestAnimationFrame(()=>requestAnimationFrame(tutorialPosition));
@@ -1145,7 +1292,7 @@ function tutorialPoll(){
   if(!TUT.active || !step || !step.waitFor) return;
   tutorialPosition();   // re-measure every tick — catches the patient dropdown opening/filtering
   if(step.waitFor()){
-    $('tutActionHint').textContent = step.doneHint || 'Nice — moving on…';
+    $('tutActionHint').textContent = step.doneHint || 'Moved on.';
     $('tutRing').classList.remove('waiting');
     TUT.waitTimer=setTimeout(()=>{ if(TUT.active) tutorialNext(); }, 800);
     return;
@@ -1227,7 +1374,6 @@ function tutorialEnd(){
 function setupTutorial(){
   $('tutorialBtn').addEventListener('click', tutorialStart);
   $('tutCloseBtn').addEventListener('click', tutorialEnd);
-  $('tutExitBtn').addEventListener('click', tutorialEnd);
   $('tutNextBtn').addEventListener('click', tutorialNext);
   $('tutPrevBtn').addEventListener('click', tutorialPrev);
   window.addEventListener('keydown',(e)=>{
@@ -1235,6 +1381,16 @@ function setupTutorial(){
     if(e.key==='Escape') tutorialEnd();
     else if(e.key==='ArrowRight') tutorialNext();
     else if(e.key==='ArrowLeft') tutorialPrev();
+  });
+  // the dimmed blockers sit on top of the page (so background clicks are
+  // inert) but that also swallows the wheel event — forward it to the
+  // scrolling stage manually so vertical scroll keeps working no matter
+  // where over the screen the mouse is during the tour
+  ['tutTop','tutBottom','tutLeft','tutRight'].forEach(id=>{
+    $(id).addEventListener('wheel',(e)=>{
+      e.preventDefault();
+      $('stage').scrollTop += e.deltaY;
+    }, {passive:false});
   });
 }
 

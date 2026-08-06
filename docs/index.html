@@ -15,7 +15,7 @@
     </div>
   </div>
   <div class="controls">
-    <button id="tutorialBtn" class="ghost tutorial-btn" title="guided tour">🎓 Tutorial</button>
+    <button id="tutorialBtn" class="ghost tutorial-btn" title="guided tour">Tutorial</button>
     <label class="ctl" id="patientCtl">Patient
       <div class="combo">
         <input id="patientSearch" placeholder="search patient…" autocomplete="off">
@@ -107,6 +107,9 @@
           <div class="tu-hint" id="tuHint">drag the ● (or the readout cursor elsewhere) to move along the predicted path</div>
           <div class="perturb-panel hidden" id="perturbPanel">
             <div class="perturb-title">Perturbations</div>
+            <label class="perturb-item perturb-match" id="perturbMatchLbl">
+              <input type="checkbox" id="perturbMatchToggle">Match antibiotics administered
+            </label>
             <div class="perturb-list" id="perturbList"></div>
           </div>
         </div>
@@ -127,7 +130,7 @@
   <div class="tut-ring" id="tutRing"></div>
   <div class="tut-card" id="tutCard" data-arrow="none">
     <div class="tut-card-head">
-      <span class="tut-step-count" id="tutStepCount">1 / 10</span>
+      <span class="tut-step-count" id="tutStepCount">1 / 7</span>
       <button class="tut-close" id="tutCloseBtn" title="exit tutorial">✕</button>
     </div>
     <h3 class="tut-title" id="tutTitle"></h3>
@@ -135,7 +138,6 @@
     <div class="tut-hint hidden" id="tutActionHint"></div>
     <div class="tut-card-foot">
       <button class="ghost sm" id="tutPrevBtn">◀ Back</button>
-      <button class="ghost sm" id="tutExitBtn">Exit tour</button>
       <button class="sm tut-next" id="tutNextBtn">Next ▶</button>
     </div>
   </div>
