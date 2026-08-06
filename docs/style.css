@@ -13,6 +13,7 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3; /* Clostridia / Bacteroidia */
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E; /* Verrucomicrobiae / Actinobacteria / Erysipelotrichia */
   --tx-pathobiont:#AA336A; --tx-other:#808080;                          /* Deltaproteobacteria (misc) / removed_taxa */
+  --flow:#ff3ec8;
 }
 .viz-root[data-theme="light"]{
   color-scheme: light;
@@ -27,6 +28,7 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3;
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E;
   --tx-pathobiont:#AA336A; --tx-other:#808080;
+  --flow:#d6009e;
 }
 
 *{box-sizing:border-box}
@@ -55,6 +57,9 @@ button.ghost{background:transparent}
 button.ghost:hover{background:var(--panel);border-color:var(--accent)}
 button.sm{padding:5px 9px;font-size:12px}
 #themeBtn{font-size:16px;padding:6px 10px}
+.tutorial-btn{font-size:13px;font-weight:650;padding:8px 13px;border-color:var(--accent2);
+  color:var(--accent2)}
+.tutorial-btn:hover{background:color-mix(in srgb,var(--accent2) 14%,transparent)}
 
 .combo{position:relative}
 .combo input{width:210px}
@@ -71,10 +76,9 @@ button.sm{padding:5px 9px;font-size:12px}
 .badge.n{background:color-mix(in srgb,var(--tx-nonferm) 28%,transparent);color:var(--tx-nonferm)}
 
 /* ---- layout ---- */
-#app{display:grid;grid-template-columns:1fr 320px;grid-template-rows:1fr;
+#app{display:grid;grid-template-columns:1fr;grid-template-rows:1fr;
   height:calc(100vh - 57px);position:relative}
-#app.empty #stage,#app.empty #metrics{visibility:hidden}
-#app:not(.empty) #placeholder{display:none}
+#app.empty #stage{visibility:hidden}
 /* the whole left-hand stage scrolls vertically as ONE unit — panels never
    scroll internally, they just contribute their natural (or fixed chart)
    height, same as how the metrics rail on the right behaves */
@@ -129,6 +133,26 @@ button.sm{padding:5px 9px;font-size:12px}
 .tu-hint{position:absolute;left:10px;bottom:8px;font-size:10.5px;color:var(--muted);
   background:color-mix(in srgb,var(--surface-1) 84%,transparent);padding:3px 8px;border-radius:6px;pointer-events:none;max-width:64%}
 .tu-axis{position:absolute;color:var(--muted);font-size:10px;pointer-events:none}
+
+/* ---- flow-field toggle + perturbations panel (TaxUMAP) ---- */
+.flow-toggle-lbl{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  color:var(--ink2);cursor:pointer;user-select:none;padding:3px 8px;border-radius:6px;
+  border:1px solid var(--border);background:var(--panel)}
+.flow-toggle-lbl:hover{border-color:var(--accent)}
+.flow-toggle-lbl input{cursor:pointer;accent-color:var(--accent2);margin:0}
+#flowCanvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.perturb-panel{position:absolute;top:30px;left:10px;background:color-mix(in srgb,var(--surface-1) 92%,transparent);
+  border:1px solid var(--border);border-radius:10px;padding:9px 11px;max-width:210px;
+  max-height:80%;overflow:auto;box-shadow:0 8px 22px rgba(0,0,0,.35)}
+.perturb-panel.hidden{display:none}
+.perturb-title{font-size:11.5px;font-weight:700;letter-spacing:.3px;color:var(--ink2);
+  text-transform:uppercase;margin-bottom:6px}
+.perturb-list{display:flex;flex-direction:column;gap:3px}
+.perturb-item{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink);
+  cursor:pointer;padding:2px 3px;border-radius:5px;user-select:none}
+.perturb-item:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.perturb-item input{cursor:pointer;accent-color:var(--accent2);margin:0}
+.perturb-swatch{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
 @keyframes tu-pulse{0%{r:11px;opacity:.55}70%{r:22px;opacity:0}100%{r:22px;opacity:0}}
 .tu-dot-halo{animation:tu-pulse 1.8s ease-out infinite}
 /* the readout dot can be grabbed and slid along the predicted path */
@@ -137,37 +161,6 @@ body.tu-dragging{cursor:grabbing}
 body.tu-dragging .tu-dot-core,body.tu-dragging .tu-dot-halo{cursor:grabbing}
 .scroll::-webkit-scrollbar{height:10px}
 .scroll::-webkit-scrollbar-thumb{background:var(--axis);border-radius:6px}
-
-/* ---- metrics ---- */
-#metrics{padding:14px 14px 14px 0;display:flex;flex-direction:column;gap:12px;overflow:auto}
-.metric-card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:12px 13px}
-.mc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.mc-title{font-size:12px;font-weight:600;color:var(--ink2)}
-.tier{font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.5px}
-.tier.LOW{background:color-mix(in srgb,var(--good) 22%,transparent);color:var(--good)}
-.tier.MED{background:color-mix(in srgb,var(--warning) 26%,transparent);color:var(--warning)}
-.tier.HIGH{background:color-mix(in srgb,var(--critical) 24%,transparent);color:var(--critical)}
-.at{font-size:11px;color:var(--muted)}
-.mc-big{display:flex;align-items:baseline;gap:6px;margin:2px 0 8px}
-.mc-big span:first-child{font-size:30px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
-.mc-unit{font-size:11px;color:var(--muted)}
-.mc-rows{display:flex;flex-direction:column;gap:4px}
-.mc-rows>div{display:flex;justify-content:space-between;font-size:12px;color:var(--ink2)}
-.mc-rows b{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink)}
-.delta{font-size:11.5px;margin-top:2px}
-.delta.up{color:var(--critical)} .delta.down{color:var(--good)}
-.note{font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.35}
-.spark{width:100%;height:34px;margin-top:8px;display:block}
-.gauge{height:8px;border-radius:5px;background:var(--grid);overflow:hidden;margin:2px 0 4px}
-.gauge-fill{height:100%;width:0;border-radius:5px;transition:width .18s ease}
-
-/* ---- placeholder / start screen ---- */
-#placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
-.ph-inner{max-width:460px;text-align:center;color:var(--ink2)}
-.ph-inner h1{font-size:24px;color:var(--ink);margin:0 0 18px}
-.start-combo{display:inline-block;text-align:left}
-.start-combo input{width:340px;font-size:15px;padding:11px 14px;text-align:center}
-.start-combo .dropdown{width:340px;text-align:left}
 
 /* ---- svg element styling ---- */
 text{fill:var(--muted);font-size:10.5px}
@@ -180,14 +173,20 @@ text{fill:var(--muted);font-size:10.5px}
 .ghost-bar{opacity:.55;pointer-events:none}
 .readout-line{stroke:var(--accent);stroke-width:1.5;stroke-dasharray:3 3}
 .readout-handle{fill:var(--accent);cursor:ew-resize}
-/* the diversity / GMHI sparklines, and the trajectory / observed-abundance
-   charts, all let you click anywhere to jump the readout day, then drag —
-   the ew-resize cursor signals that the whole chart is a scrub target */
-#divSpark,#gmhiSpark,#compSvg,#obsSvg{cursor:ew-resize}
+/* the trajectory / observed-abundance charts let you click anywhere to jump
+   the readout day, then drag — the ew-resize cursor signals a scrub target */
+#compSvg,#obsSvg{cursor:ew-resize}
 .entero-outline{fill:none;stroke:var(--ink);stroke-width:1.4;opacity:.75}
 .baseline-trace{fill:none;stroke:var(--ink2);stroke-width:2;stroke-dasharray:7 5;stroke-linecap:butt;opacity:.95;shape-rendering:crispEdges}
+/* Enterococcus BSI risk line: a bold, glowing dark-green trailing-mean trace,
+   with a light halo underneath so it stays legible crossing the (similarly
+   dark-green) Enterococcus band it's summarizing */
+.entero-risk-halo{fill:none;stroke:var(--surface-1);stroke-width:5.5;stroke-linejoin:round;opacity:.85}
+.entero-risk-line{fill:none;stroke:var(--tx-entero);stroke-width:2.6;stroke-linejoin:round;
+  filter:drop-shadow(0 0 3px var(--tx-entero))}
 /* overlays never intercept hover — the taxa tooltip should read the band underneath */
-.entero-outline,.baseline-trace,.readout-line,.readout-handle,.axis-tick,.axis-base,.thr-line{pointer-events:none}
+.entero-outline,.baseline-trace,.entero-risk-halo,.entero-risk-line,
+.readout-line,.readout-handle,.axis-tick,.axis-base,.thr-line{pointer-events:none}
 #compSvg text{pointer-events:none}
 .gut-ylabel{fill:var(--ink2);font-size:11px}
 .gut-catlabel{fill:var(--ink2);font-size:11px}
@@ -202,3 +201,46 @@ text{fill:var(--muted);font-size:10.5px}
 .tooltip .tt-row{display:flex;align-items:center;gap:6px;justify-content:space-between}
 .tooltip .tt-sw{width:9px;height:9px;border-radius:2px;display:inline-block}
 .tooltip b{font-variant-numeric:tabular-nums}
+
+/* ---- guided tutorial: spotlight overlay ---- */
+#tutOverlay.hidden{display:none}
+/* the overlay root itself must NOT catch clicks — only its blocker strips and
+   card should (the ring is a pure visual cutout with pointer-events:none), or
+   the "spotlighted" element (e.g. the patient search box) would be unusable */
+#tutOverlay{position:fixed;inset:0;z-index:500;pointer-events:none}
+.tut-blocker{position:fixed;background:rgba(0,0,0,.68);transition:all .22s ease;pointer-events:auto}
+.tut-ring{position:fixed;border:2px solid var(--accent2);border-radius:10px;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent2) 35%,transparent),0 0 22px color-mix(in srgb,var(--accent2) 55%,transparent);
+  pointer-events:none;transition:all .22s ease;z-index:500}
+.tut-ring.waiting{animation:tut-ring-pulse 1.4s ease-in-out infinite}
+@keyframes tut-ring-pulse{
+  0%,100%{border-color:var(--accent2);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent2) 35%,transparent),0 0 22px color-mix(in srgb,var(--accent2) 55%,transparent)}
+  50%{border-color:var(--warning);box-shadow:0 0 0 6px color-mix(in srgb,var(--warning) 30%,transparent),0 0 30px color-mix(in srgb,var(--warning) 60%,transparent)}
+}
+.tut-card{position:fixed;z-index:501;width:328px;max-width:calc(100vw - 24px);pointer-events:auto;
+  background:var(--panel);border:1px solid var(--border);border-radius:12px;
+  padding:14px 16px 12px;box-shadow:0 16px 40px rgba(0,0,0,.5);transition:top .22s ease,left .22s ease}
+.tut-card::before{content:"";position:absolute;width:14px;height:14px;background:var(--panel);
+  border:1px solid var(--border);display:none}
+.tut-card[data-arrow="bottom"]::before{display:block;top:-8px;left:var(--arrow-x,24px);
+  border-right:none;border-bottom:none;transform:rotate(45deg)}
+.tut-card[data-arrow="top"]::before{display:block;bottom:-8px;left:var(--arrow-x,24px);
+  border-left:none;border-top:none;transform:rotate(45deg)}
+.tut-card[data-arrow="right"]::before{display:block;left:-8px;top:50%;margin-top:-7px;
+  border-right:none;border-top:none;transform:rotate(45deg)}
+.tut-card[data-arrow="left"]::before{display:block;right:-8px;top:50%;margin-top:-7px;
+  border-left:none;border-bottom:none;transform:rotate(45deg)}
+.tut-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.tut-step-count{font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--muted);text-transform:uppercase}
+.tut-close{background:transparent;border:none;color:var(--muted);font-size:13px;padding:2px 5px;line-height:1}
+.tut-close:hover{color:var(--ink)}
+.tut-title{margin:0 0 6px;font-size:14.5px;font-weight:700;color:var(--ink)}
+.tut-body{font-size:12.5px;line-height:1.5;color:var(--ink2)}
+.tut-body b{color:var(--ink)}
+.tut-hint{margin-top:8px;font-size:11.5px;font-weight:600;color:var(--accent2);
+  background:color-mix(in srgb,var(--accent2) 14%,transparent);border-radius:7px;padding:6px 9px}
+.tut-hint.hidden{display:none}
+.tut-card-foot{display:flex;align-items:center;gap:7px;margin-top:12px}
+.tut-card-foot .tut-next{margin-left:auto;background:var(--accent2);color:#fff;border-color:var(--accent2);font-weight:650}
+.tut-card-foot .tut-next:hover{filter:brightness(1.08)}
+.tut-card-foot #tutPrevBtn:disabled{opacity:.35;cursor:default}

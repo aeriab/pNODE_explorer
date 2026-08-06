@@ -15,6 +15,7 @@
     </div>
   </div>
   <div class="controls">
+    <button id="tutorialBtn" class="ghost tutorial-btn" title="guided tour">🎓 Tutorial</button>
     <label class="ctl" id="patientCtl">Patient
       <div class="combo">
         <input id="patientSearch" placeholder="search patient…" autocomplete="off">
@@ -66,24 +67,6 @@
       </div>
     </div>
 
-    <!-- TAXUMAP — collapsed by default -->
-    <div class="panel collapsed" id="tuPanel">
-      <div class="panel-head">
-        <div class="head-left">
-          <button class="panel-toggle" id="tuToggle" title="expand">▸</button>
-          <h2>TaxUMAP community map</h2>
-        </div>
-      </div>
-      <div class="panel-body tu-body" id="tuBody">
-        <div id="taxumapWrap">
-          <canvas id="taxumapCanvas"></canvas>
-          <svg id="taxumapSvg"></svg>
-          <div class="tu-legend" id="tuLegend"></div>
-          <div class="tu-hint" id="tuHint">drag the ● (or the readout cursor elsewhere) to move along the predicted path</div>
-        </div>
-      </div>
-    </div>
-
     <!-- ABX EDITOR — expanded by default -->
     <div class="panel" id="abxPanel">
       <div class="panel-head">
@@ -103,55 +86,61 @@
         </div>
       </div>
     </div>
+
+    <!-- TAXUMAP — collapsed by default -->
+    <div class="panel collapsed" id="tuPanel">
+      <div class="panel-head">
+        <div class="head-left">
+          <button class="panel-toggle" id="tuToggle" title="expand">▸</button>
+          <h2>TaxUMAP community map</h2>
+          <label class="flow-toggle-lbl" id="flowToggleLbl">
+            <input type="checkbox" id="flowToggle"> Show flow lines
+          </label>
+        </div>
+      </div>
+      <div class="panel-body tu-body" id="tuBody">
+        <div id="taxumapWrap">
+          <canvas id="taxumapCanvas"></canvas>
+          <canvas id="flowCanvas"></canvas>
+          <svg id="taxumapSvg"></svg>
+          <div class="tu-legend" id="tuLegend"></div>
+          <div class="tu-hint" id="tuHint">drag the ● (or the readout cursor elsewhere) to move along the predicted path</div>
+          <div class="perturb-panel hidden" id="perturbPanel">
+            <div class="perturb-title">Perturbations</div>
+            <div class="perturb-list" id="perturbList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
-
-  <!-- METRICS -->
-  <aside id="metrics">
-    <div class="metric-card" id="mEntero">
-      <div class="mc-head"><span class="mc-title">Enterococcus BSI risk</span><span class="tier" id="enteroTier">—</span></div>
-      <div class="mc-rows">
-        <div><span>peak abundance</span><b id="enteroPeak">—</b></div>
-        <div><span>days dominated (21 d)</span><b id="enteroDays">—</b></div>
-        <div class="delta" id="enteroDelta"></div>
-      </div>
-      <svg class="spark" id="enteroSpark"></svg>
-    </div>
-
-    <div class="metric-card" id="mNon">
-      <div class="mc-head"><span class="mc-title">Gram-negative BSI risk</span><span class="tier" id="nonTier">—</span></div>
-      <div class="mc-rows">
-        <div><span>peak abundance</span><b id="nonPeak">—</b></div>
-        <div><span>baseline abundance</span><b id="nonA0">—</b></div>
-      </div>
-    </div>
-
-    <div class="metric-card" id="mDiv">
-      <div class="mc-head"><span class="mc-title">Alpha diversity</span><span class="at" id="divAt">@ +14 d</span></div>
-      <div class="mc-big"><span id="shannonVal">—</span><span class="mc-unit">Shannon</span></div>
-      <div class="mc-rows"><div><span>inverse Simpson</span><b id="invsimpVal">—</b></div></div>
-      <svg class="spark" id="divSpark"></svg>
-    </div>
-
-    <div class="metric-card" id="mGmhi">
-      <div class="mc-head"><span class="mc-title">Gut Microbiome Health Index</span><span class="at" id="gmhiAt">@ +14 d</span></div>
-      <div class="mc-big"><span id="gmhiVal">—</span><span class="mc-unit">/ 100</span></div>
-      <div class="gauge"><div class="gauge-fill" id="gmhiFill"></div></div>
-      <svg class="spark" id="gmhiSpark"></svg>
-    </div>
-  </aside>
-
-  <div id="placeholder">
-    <div class="ph-inner">
-      <h1>Pick a patient to begin</h1>
-      <div class="combo start-combo">
-        <input id="patientSearchStart" placeholder="search patient…" autocomplete="off">
-        <div id="patientListStart" class="dropdown hidden"></div>
-      </div>
-    </div>
-  </div>
 </main>
 
 <div id="busy" class="hidden"></div>
+
+<!-- guided tutorial: spotlight overlay + pointer-bubble, built once and
+     driven entirely from JS (see setupTutorial() in app.js) -->
+<div id="tutOverlay" class="hidden">
+  <div class="tut-blocker" id="tutTop"></div>
+  <div class="tut-blocker" id="tutBottom"></div>
+  <div class="tut-blocker" id="tutLeft"></div>
+  <div class="tut-blocker" id="tutRight"></div>
+  <div class="tut-ring" id="tutRing"></div>
+  <div class="tut-card" id="tutCard" data-arrow="none">
+    <div class="tut-card-head">
+      <span class="tut-step-count" id="tutStepCount">1 / 10</span>
+      <button class="tut-close" id="tutCloseBtn" title="exit tutorial">✕</button>
+    </div>
+    <h3 class="tut-title" id="tutTitle"></h3>
+    <div class="tut-body" id="tutBody"></div>
+    <div class="tut-hint hidden" id="tutActionHint"></div>
+    <div class="tut-card-foot">
+      <button class="ghost sm" id="tutPrevBtn">◀ Back</button>
+      <button class="ghost sm" id="tutExitBtn">Exit tour</button>
+      <button class="sm tut-next" id="tutNextBtn">Next ▶</button>
+    </div>
+  </div>
+</div>
+
 <script src="engine.js"></script>
 <script src="app.js"></script>
 </body>

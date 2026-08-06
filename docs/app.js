@@ -111,7 +111,8 @@ const S = {
   abxOrder:[], schedule:{}, baseSchedule:{}, observed:[],
   observedComposition:[], compTaxa:null, bsiEvents:[],
   fc:null, baseFc:null, readoutDay:14,
-  pxPerDay:18, plotW:0,
+  pxPerDay:18, plotW:0, scrollPx:0,
+  flowOn:false, perturbations:{},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -130,16 +131,17 @@ async function api(path, opts){ return window.LOCAL_API(path, opts); }
 // --------------------------------------------------------------------- //
 //  init
 // --------------------------------------------------------------------- //
+const DEFAULT_PID = '184';
+
 async function init(){
   S.meta = await api('/api/meta');
   S.patients = await api('/api/patients');
   buildPatientDropdown('patientSearch','patientList');       // header switcher
-  buildPatientDropdown('patientSearchStart','patientListStart'); // start screen
   $('sampleSelect').addEventListener('change', ()=> S.pid && loadForecast(true));
   $('resetBtn').addEventListener('click', ()=>{ S.schedule=clone(S.baseSchedule); commit(); });
   $('clearBtn').addEventListener('click', ()=>{ S.schedule={}; commit(); });
   $('themeBtn').addEventListener('click', toggleTheme);
-  // each panel (trajectory / observed abundance / taxUMAP / abx timeline) can be
+  // each panel (trajectory / observed abundance / abx timeline / taxUMAP) can be
   // independently collapsed to just its header, or expanded to show its body
   ['trajPanel','obsPanel','tuPanel','abxPanel'].forEach(pid=>{
     const panel=$(pid), btn=panel.querySelector('.panel-toggle');
@@ -152,36 +154,25 @@ async function init(){
         else if(pid==='obsPanel') renderObserved();
         else if(pid==='tuPanel') renderTaxumap();
         else if(pid==='abxPanel') renderAbx();
+        applyScrollPx();   // a just-shown scroller was frozen at 0 while hidden
       }
     });
   });
   window.addEventListener('resize', ()=>{ if(S.fc){ layout(); renderAll(); }});
   setupPointer();
   setupCompTooltip();
-  // keep the trajectory / observed / antibiotic charts horizontally aligned
-  // while scrolling — they all share the same day axis
-  const hScroll=['scrollComp','scrollObs','scrollAbx'].map($);
-  let syncing=false;
-  hScroll.forEach(a=>a.addEventListener('scroll', ()=>{
-    if(syncing) return; syncing=true;
-    hScroll.forEach(b=>{ if(b!==a) b.scrollLeft=a.scrollLeft; });
-    syncing=false;
-  }));
-  // horizontal wheel/trackpad ANYWHERE over the left panel scrolls the shared
-  // day-axis timeline — even over gaps, gutters, headings or text. Plain
-  // vertical wheel is left alone so it scrolls the stage (all panels) as usual.
-  $('stage').addEventListener('wheel', (e)=>{
-    const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-    const dx = horiz ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
-    if(!dx || !S.fc) return;
-    e.preventDefault();
-    const a=hScroll[0];
-    const nl=clamp(a.scrollLeft + dx, 0, Math.max(0, a.scrollWidth - a.clientWidth));
-    hScroll.forEach(sc=>{ sc.scrollLeft=nl; });
-  }, {passive:false});
-  // deep-link: #p=<patientId> auto-opens that patient on load
+  setupScrollSync();
+  setupFlowControls();
+  setupTutorial();
+  // deep-link: #p=<patientId> auto-opens that patient on load (used by the
+  // tutorial's "search for a patient" step, and shareable links in general);
+  // otherwise the explorer always opens straight on the default patient/sample
+  // — there is no "pick a patient" landing screen.
   const hp=(location.hash.match(/p=([^&]+)/)||[])[1];
-  if(hp){ const id=decodeURIComponent(hp); if(S.patients.some(p=>String(p.id)===id)) selectPatient(id); }
+  const hid=hp?decodeURIComponent(hp):null;
+  const startId = (hid && S.patients.some(p=>String(p.id)===hid)) ? hid
+    : (S.patients.some(p=>String(p.id)===DEFAULT_PID) ? DEFAULT_PID : (S.patients[0]&&S.patients[0].id));
+  if(startId) await selectPatient(startId);
 }
 
 function toggleTheme(){
@@ -222,6 +213,7 @@ async function selectPatient(pid){
   S.pid=pid; S.abxOrder=info.abx_order; S.baseSchedule=info.schedule; S.observed=info.observed||[];
   S.observedComposition=info.observed_composition||[]; S.compTaxa=info.comp_taxa||null;
   S.bsiEvents=info.bsi||[];
+  buildPerturbList();   // built once, from the fixed 15-class antibiotic set
   const sel=$('sampleSelect'); sel.innerHTML=''; sel.disabled=false;
   info.samples.forEach((s,i)=>{
     const o=document.createElement('option'); o.value=JSON.stringify(s);
@@ -230,9 +222,8 @@ async function selectPatient(pid){
     sel.appendChild(o);
   });
   sel.selectedIndex = 0;   // auto-pick the patient's first 16S sample
-  document.body.classList.add('has-patient');   // reveal header controls, hide start screen
+  document.body.classList.add('has-patient');   // reveal header controls
   const hi=$('patientSearch'); if(hi) hi.value=pid;
-  const si=$('patientSearchStart'); if(si) si.value=pid;
   await loadForecast(true);
 }
 
@@ -292,6 +283,51 @@ function layout(){
   S.plotW = PAD_L + S.horizon*S.pxPerDay + PAD_R;
 }
 
+// --------------------------------------------------------------------- //
+//  horizontal scroll sync — the trajectory (prediction), observed-abundance
+//  (samples) and antibiotic-timeline charts all share one day axis and must
+//  stay pixel-for-pixel aligned. S.scrollPx is the single source of truth;
+//  every render/expand/patient-switch re-applies it to all three containers
+//  instead of relying only on mirroring 'scroll' events between them — a
+//  collapsed panel's container is display:none, and assigning .scrollLeft on
+//  a zero-size element is silently dropped by the browser, which is what let
+//  the samples panel and the prediction panel drift out of sync after a
+//  collapse/expand or patient/sample switch. Re-applying on every render
+//  (including right after a panel becomes visible again) closes that gap.
+// --------------------------------------------------------------------- //
+const SCROLLERS = ['scrollComp','scrollObs','scrollAbx'];
+function applyScrollPx(){
+  SCROLLERS.forEach(id=>{
+    const el=$(id); if(!el) return;
+    const max=Math.max(0, el.scrollWidth-el.clientWidth);
+    const px=clamp(S.scrollPx||0, 0, max);
+    if(el.scrollLeft!==px) el.scrollLeft=px;
+  });
+}
+function setupScrollSync(){
+  const hScroll=SCROLLERS.map($);
+  let syncing=false;
+  hScroll.forEach(a=>a.addEventListener('scroll', ()=>{
+    if(syncing) return; syncing=true;
+    S.scrollPx=a.scrollLeft;
+    applyScrollPx();
+    syncing=false;
+  }));
+  // horizontal wheel/trackpad ANYWHERE over the left panel scrolls the shared
+  // day-axis timeline — even over gaps, gutters, headings or text. Plain
+  // vertical wheel is left alone so it scrolls the stage (all panels) as usual.
+  $('stage').addEventListener('wheel', (e)=>{
+    const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    const dx = horiz ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+    if(!dx || !S.fc) return;
+    e.preventDefault();
+    const ref=hScroll.find(el=>el.clientWidth>0) || hScroll[0];
+    const max=Math.max(0, ref.scrollWidth-ref.clientWidth);
+    S.scrollPx=clamp((S.scrollPx||0)+dx, 0, max);
+    applyScrollPx();
+  }, {passive:false});
+}
+
 function dayTicks(){
   // choose a "nice" day spacing
   const target = 70;                                  // px between ticks
@@ -306,7 +342,7 @@ function dayTicks(){
 // --------------------------------------------------------------------- //
 //  composition charts (trajectory + observed abundance)
 // --------------------------------------------------------------------- //
-function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
+function renderAll(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); applyScrollPx(); }
 
 // Order the genera for stacking by TAXONOMY (Xavier/MSKCC convention), not abundance:
 // palette-group order, then genus name within a group, so same-colour relatives stack
@@ -339,10 +375,14 @@ function buildLegend(){
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
   });
-  // the dashed baseline trace only appears in the predicted (trajectory) view
+  // the dashed baseline trace and the risk-mean overlay only appear in the
+  // predicted (trajectory) view
   const d2=document.createElement('span'); d2.className='leg';
   d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
   lg.appendChild(d2);
+  const d3=document.createElement('span'); d3.className='leg';
+  d3.innerHTML=`<span class="sw" style="background:var(--tx-entero);width:12px;height:3px;border-radius:2px"></span>Enterococcus BSI risk (${enteroRiskWindowDays()}d mean)`;
+  lg.appendChild(d3);
   appendBsiLegend(lg);
 }
 
@@ -455,6 +495,41 @@ function drawPredicted(g, y){
   const e=enteroBand(S.fc);
   g.appendChild(el('path',{class:'entero-outline',
     d:'M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(e[i]).toFixed(1)}`).join('L')}));
+  drawEnteroRiskLine(g, y, days);
+}
+
+// Enterococcus BSI risk overlay: a bold, highlighted dark-green line tracking
+// the TRAILING mean predicted Enterococcus fraction over a W-day window
+// (W = the model's own risk_window, the same 21 d used to define "dominated"),
+// anchored so the window never reaches before the start of the prediction
+// (day t0) — it widens from a same-day value up to a full W-day trailing
+// window as the forecast advances. Time-weighted (trapezoidal) so the fixed
+// half-day forecast grid doesn't bias the average. Drawn with a halo so it
+// reads clearly even where it crosses the (similarly dark-green) Enterococcus
+// band itself.
+function enteroRiskWindowDays(){ return (S.meta && S.meta.risk_window) || 21; }
+function enteroRollingRisk(days, e){
+  const W=enteroRiskWindowDays(), out=new Array(days.length);
+  let lo=0;
+  for(let i=0;i<days.length;i++){
+    const dHi=days[i], dLo=Math.max(S.t0, dHi-W);
+    while(lo<i && days[lo+1]<=dLo+1e-9) lo++;
+    let sum=0, span=0;
+    for(let k=lo;k<i;k++){
+      const d0=Math.max(days[k],dLo), d1=days[k+1];
+      if(d1<=d0) continue;
+      const v0=interp(days,e,d0);
+      sum+=(v0+e[k+1])/2*(d1-d0); span+=(d1-d0);
+    }
+    out[i]= span>1e-9 ? sum/span : e[i];
+  }
+  return out;
+}
+function drawEnteroRiskLine(g, y, days){
+  const risk=enteroRollingRisk(days, S.fc.entero);
+  const d='M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(risk[i]).toFixed(1)}`).join('L');
+  g.appendChild(el('path',{class:'entero-risk-halo', d}));
+  g.appendChild(el('path',{class:'entero-risk-line', d}));
 }
 
 // observed view: measured 16S composition as 1-day-thick stacked bars at each sample day
@@ -528,6 +603,7 @@ function renderTaxumap(){
   // legend + path both depend on the current patient's forecast (and BSI events)
   if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); drawTaxumapLegend(); }
   taxumapMoveDot();
+  drawFlowField();
   $('tuHint').textContent='drag the ● (or the readout cursor elsewhere) to move along the predicted path';
 }
 
@@ -539,6 +615,8 @@ function setupTaxumapMap(w,h){
   const dpr=Math.min(window.devicePixelRatio||1, 2);
   const cv=$('taxumapCanvas'); cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr);
   cv.style.width=w+'px'; cv.style.height=h+'px';
+  const fc=$('flowCanvas'); fc.width=Math.round(w*dpr); fc.height=Math.round(h*dpr);
+  fc.style.width=w+'px'; fc.style.height=h+'px';
   const svg=$('taxumapSvg'); svg.setAttribute('viewBox',`0 0 ${w} ${h}`); svg.innerHTML='';
   svg.appendChild(el('text',{x:w-8,y:h-7,'text-anchor':'end',fill:cvar('--muted'),'font-size':10},[txt('TaxUMAP-1 →')]));
   svg.appendChild(el('text',{x:11,y:15,fill:cvar('--muted'),'font-size':10},[txt('↑ TaxUMAP-2')]));
@@ -656,6 +734,133 @@ function drawTaxumapLegend(){
   }
 }
 
+// --------------------------------------------------------------------- //
+//  TaxUMAP flow field — a map-wide vector field showing where community
+//  composition is predicted to DRIFT under a fixed, constant antibiotic
+//  exposure (the toggled "Perturbations"), independent of any one patient.
+//  For a spatial sample of the TaxUMAP reference profiles, each arrow runs
+//  the SAME validated pNODE integrator (window.__tipnodeForecast) forward
+//  FLOW_DT days holding the toggled classes continuously "on" from a real
+//  reference composition, then re-projects the resulting composition back
+//  onto the map — the arrow is the reference point's real position pointing
+//  at where the model predicts it would end up.
+// --------------------------------------------------------------------- //
+const FLOW_DT = 7;            // days of constant exposure integrated per arrow
+const FLOW_GRID = 24;         // spatial bins per axis when sampling reference points
+const FLOW_ARROW_PX = 15;     // fixed on-screen arrow length (direction matters, not raw magnitude)
+const FLOW_MIN_DRIFT = 1e-3;  // skip arrows for points the model predicts won't move (data-space units)
+
+let _flowPoints=null;         // cached {r, x, y}[] — spatial subsample of TaxUMAP reference indices
+function pickFlowSamplePoints(info){
+  if(_flowPoints) return _flowPoints;
+  const [xmin,xmax,ymin,ymax]=info.bounds;
+  const cellW=(xmax-xmin)/FLOW_GRID||1, cellH=(ymax-ymin)/FLOW_GRID||1;
+  const chosen=new Map();
+  for(let r=0;r<info.nRef;r++){
+    const x=info.knnCoords[2*r], y=info.knnCoords[2*r+1];
+    const cx=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((x-xmin)/cellW)));
+    const cy=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((y-ymin)/cellH)));
+    const key=cx*FLOW_GRID+cy;
+    if(!chosen.has(key)) chosen.set(key,r);   // first reference point claims each cell
+  }
+  _flowPoints=[...chosen.values()];
+  return _flowPoints;
+}
+
+let _flowCache={key:null, vectors:null};
+function activePerturbationSchedule(){
+  const sched={};
+  Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
+  return sched;
+}
+function computeFlowField(){
+  if(!window.TAXUMAP || !TAXUMAP.ready() || !window.__tipnodeForecast) return null;
+  const N = S.fc && S.fc.fullComp && S.fc.fullComp[0] ? S.fc.fullComp[0].length : null;
+  if(!N) return null;
+  const key = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
+  if(_flowCache.key===key && _flowCache.vectors) return _flowCache.vectors;
+  const info = TAXUMAP.info();
+  const idxs = pickFlowSamplePoints(info);
+  const schedule = activePerturbationSchedule();
+  const vectors=[];
+  for(const r of idxs){
+    const x0=new Float64Array(N);
+    for(let p=info.gptr[r]; p<info.gptr[r+1]; p++) x0[info.genI[p]]=info.gVal[p];
+    let fc;
+    try{ fc=window.__tipnodeForecast(x0,0,FLOW_DT,schedule); }
+    catch(e){ continue; }
+    const comp2=fc.fullComp[fc.fullComp.length-1];
+    const p1=TAXUMAP.project(comp2);
+    if(!p1) continue;
+    const x0d=info.knnCoords[2*r], y0d=info.knnCoords[2*r+1];
+    if(Math.hypot(p1[0]-x0d,p1[1]-y0d)<FLOW_MIN_DRIFT) continue;
+    vectors.push([x0d,y0d,p1[0],p1[1]]);
+  }
+  _flowCache={key,vectors};
+  return vectors;
+}
+
+function clearFlowCanvas(){
+  const cv=$('flowCanvas'); if(!cv||!_tu) return;
+  const ctx=cv.getContext('2d');
+  ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0); ctx.clearRect(0,0,_tu.w,_tu.h);
+}
+function drawFlowField(){
+  clearFlowCanvas();
+  if(!S.flowOn || !_tu) return;
+  const vectors=computeFlowField();
+  const cv=$('flowCanvas'); if(!vectors||!cv) return;
+  const ctx=cv.getContext('2d');
+  ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+  ctx.strokeStyle=cvar('--flow'); ctx.fillStyle=cvar('--flow'); ctx.lineWidth=1.3;
+  // raw (unnormalised) screen-space drift lengths, for a mild magnitude cue via opacity
+  const raw=vectors.map(([x0,y0,x1,y1])=>{
+    const a=_tu.map(x0,y0), b=_tu.map(x1,y1); return Math.hypot(b[0]-a[0],b[1]-a[1]);
+  });
+  const maxRaw=Math.max(1e-6, ...raw);
+  vectors.forEach(([x0,y0,x1,y1],i)=>{
+    const p0=_tu.map(x0,y0), p1=_tu.map(x1,y1);
+    const dx=p1[0]-p0[0], dy=p1[1]-p0[1], len=Math.hypot(dx,dy);
+    if(len<0.5) return;
+    const ux=dx/len, uy=dy/len;
+    const ex=p0[0]+ux*FLOW_ARROW_PX, ey=p0[1]+uy*FLOW_ARROW_PX;
+    ctx.globalAlpha=clamp(0.35+0.65*(raw[i]/maxRaw), 0.35, 0.95);
+    ctx.beginPath(); ctx.moveTo(p0[0],p0[1]); ctx.lineTo(ex,ey); ctx.stroke();
+    const ang=Math.atan2(dy,dx), ah=4.2;
+    ctx.beginPath(); ctx.moveTo(ex,ey);
+    ctx.lineTo(ex-ah*Math.cos(ang-0.5), ey-ah*Math.sin(ang-0.5));
+    ctx.lineTo(ex-ah*Math.cos(ang+0.5), ey-ah*Math.sin(ang+0.5));
+    ctx.closePath(); ctx.fill();
+  });
+  ctx.globalAlpha=1;
+}
+
+// "Show flow lines" toggle + the "Perturbations" antibiotic checklist under it.
+// The perturbation set is independent of the antibiotic-timeline editor: it
+// drives ONLY the map-wide flow field (a constant, sustained-exposure query
+// against the model), not the current patient's own forecast.
+function buildPerturbList(){
+  const list=$('perturbList'); if(!list || list.childElementCount) return;   // build once
+  const cats=(S.abxOrder||[]).slice().sort((a,b)=>abxLabel(a).localeCompare(abxLabel(b)));
+  cats.forEach(cat=>{
+    S.perturbations[cat]=false;
+    const lab=document.createElement('label'); lab.className='perturb-item';
+    lab.innerHTML=`<input type="checkbox" data-cat="${cat}"><span class="perturb-swatch" style="background:${cvar('--flow')}"></span>${abxLabel(cat)}`;
+    lab.querySelector('input').addEventListener('change',(e)=>{
+      S.perturbations[cat]=e.target.checked;
+      if(S.fc) renderTaxumap();
+    });
+    list.appendChild(lab);
+  });
+}
+function setupFlowControls(){
+  $('flowToggle').addEventListener('change',(e)=>{
+    S.flowOn=e.target.checked;
+    $('perturbPanel').classList.toggle('hidden', !S.flowOn);
+    if(S.fc) renderTaxumap();
+  });
+}
+
 function drawDayAxis(g, yBase, showLabels){
   g.appendChild(el('line',{x1:PAD_L,y1:yBase,x2:S.plotW-PAD_R,y2:yBase,class:'axis-base'}));
   dayTicks().forEach(d=>{
@@ -728,12 +933,19 @@ function renderAbx(){
   renderAbxGutter();
 }
 
+// shorten a raw drug-class key ("glycopeptide_antibiotics") to a compact display
+// label ("glycopeptide") — shared by the abx-timeline gutter and the
+// Perturbations toggle list on the TaxUMAP flow field
+function abxLabel(cat){
+  return cat.replace(/_/g,' ').replace(' antibiotics','').replace(' derivatives','').replace(' agents','');
+}
+
 function renderAbxGutter(){
   const gut=$('abxGutter'); gut.innerHTML='';
   const svg=el('svg',{width:132,height:S.abxOrder.length*LANE_H+ABX_AXIS_H+2});
   S.abxOrder.forEach((cat,li)=>{
     const used=(S.baseSchedule[cat]&&S.baseSchedule[cat].length)|| (S.schedule[cat]&&S.schedule[cat].length);
-    const label=cat.replace(' antibiotics','').replace(' derivatives','').replace(' agents','');
+    const label=abxLabel(cat);
     const t=el('text',{x:126,y:li*LANE_H+LANE_H/2+3.5,'text-anchor':'end',
       class:'gut-catlabel'+(used?'':' unused')},[txt(label.length>19?label.slice(0,18)+'…':label)]);
     svg.appendChild(t);
@@ -744,8 +956,8 @@ function renderAbxGutter(){
 // --------------------------------------------------------------------- //
 //  editing interactions
 // --------------------------------------------------------------------- //
-let drag=null, readoutDrag=null, sparkDrag=null, tuDrag=false;
-function refreshReadoutViews(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); renderMetrics(); }
+let drag=null, readoutDrag=null, tuDrag=false;
+function refreshReadoutViews(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); }
 function setupPointer(){   // attached ONCE from init()
   const near=(ev,sv)=> Math.abs(localX(ev,sv)-xDay(S.readoutDay))<7;
   // trajectory / observed-abundance charts: click anywhere to jump the readout
@@ -757,13 +969,6 @@ function setupPointer(){   // attached ONCE from init()
       S.readoutDay=clamp(Math.round(dayFromX(localX(ev,$(id)))), S.t0, S.t0+S.horizon);
       refreshReadoutViews();
       ev.preventDefault();
-    });
-  });
-  // the diversity / GMHI sparklines: click-drag anywhere to move the readout day
-  ['divSpark','gmhiSpark'].forEach(id=>{
-    $(id).addEventListener('pointerdown',(ev)=>{
-      if(!S.fc) return;
-      sparkDrag=$(id); setReadoutFromSpark(sparkDrag, ev.clientX); ev.preventDefault();
     });
   });
   // taxUMAP: grab the readout dot and slide it along the predicted path —
@@ -787,7 +992,6 @@ function setupPointer(){   // attached ONCE from init()
     ghost();
   });
   window.addEventListener('pointermove',(ev)=>{
-    if(sparkDrag){ setReadoutFromSpark(sparkDrag, ev.clientX); return; }
     if(tuDrag){
       const [x,y]=localXY(ev,$('taxumapSvg'));
       const idx=nearestTaxumapIndex(x,y);
@@ -805,7 +1009,7 @@ function setupPointer(){   // attached ONCE from init()
     }
   });
   window.addEventListener('pointerup',()=>{
-    readoutDrag=null; sparkDrag=null;
+    readoutDrag=null;
     if(tuDrag){ tuDrag=false; document.body.classList.remove('tu-dragging'); }
     if(drag){
       const moved=Math.abs(drag.cur-drag.start);
@@ -818,14 +1022,6 @@ function setupPointer(){   // attached ONCE from init()
 
 function localX(ev,svg){ const s=svg||$('abxSvg'); const r=s.getBoundingClientRect(); return ev.clientX-r.left; }
 function localXY(ev,svg){ const r=svg.getBoundingClientRect(); return [ev.clientX-r.left, ev.clientY-r.top]; }
-// invert a sparkline's X scale (see sparkLine(): X=d=>2+(d-d0)/(dN-d0)*(w-4))
-function setReadoutFromSpark(svg, clientX){
-  if(!S.fc) return;
-  const r=svg.getBoundingClientRect(), days=S.fc.day, w=r.width||svg.clientWidth;
-  const day=days[0]+(clientX-r.left-2)/(w-4)*(days[days.length-1]-days[0]);
-  S.readoutDay=clamp(Math.round(day), S.t0, S.t0+S.horizon);
-  refreshReadoutViews();
-}
 function hit(ev){
   const r=$('abxSvg').getBoundingClientRect();
   const x=ev.clientX-r.left, y=ev.clientY-r.top;
@@ -875,7 +1071,7 @@ let _thr=0;
 function throttledCommit(){ const now=performance.now(); if(now-_thr>140){ _thr=now; commit(); } }
 
 // --------------------------------------------------------------------- //
-//  metrics
+//  small numeric helpers
 // --------------------------------------------------------------------- //
 function interp(days, arr, d){
   if(d<=days[0]) return arr[0];
@@ -884,72 +1080,162 @@ function interp(days, arr, d){
   const f=(d-days[i-1])/(days[i]-days[i-1]);
   return arr[i-1]+f*(arr[i]-arr[i-1]);
 }
-// LOW uses <= so a zero-burden bottom tertile (q1 can be 0) is classified LOW, not MED
-function tierOf(val,q1,q2){ return val<=q1?'LOW':(val>q2?'HIGH':'MED'); }
 
-function renderMetrics(){
-  const m=S.fc.metrics, ref=S.meta.risk_reference;
-  // Enterococcus
-  const et=tierOf(m['entero_days_above_0.3'], ref.entero.q1, ref.entero.q2);
-  $('enteroTier').textContent=et; $('enteroTier').className='tier '+et;
-  $('enteroPeak').textContent=m.entero_peak.toFixed(3);
-  $('enteroDays').textContent=m['entero_days_above_0.3'].toFixed(1)+' d';
-  // delta vs actual regimen
-  const bd=S.baseFc.metrics['entero_days_above_0.3'];
-  const dd=m['entero_days_above_0.3']-bd;
-  const de=$('enteroDelta');
-  if(Math.abs(dd)<0.05){ de.textContent='= actual regimen'; de.className='delta'; }
-  else{ de.textContent=`${dd>0?'▲ +':'▼ '}${dd.toFixed(1)} d dominated vs actual`;
-    de.className='delta '+(dd>0?'up':'down'); }
-  sparkLine($('enteroSpark'), S.fc.day, S.fc.entero, {min:0,max:1,thr:DOM_THRESH,
-    color:cvar('--tx-entero'), base:S.baseFc.entero});
-  // Non-Enterococcus
-  const nt=tierOf(m.nonentero_peak, ref.nonentero.q1, ref.nonentero.q2);
-  $('nonTier').textContent=nt; $('nonTier').className='tier '+nt;
-  $('nonPeak').textContent=m.nonentero_peak.toExponential(1);
-  $('nonA0').textContent=m.nonentero_a0.toExponential(1);
-  // readout-day metrics (client-side at readoutDay)
-  const rd=S.readoutDay;
-  const sh=interp(S.fc.day,S.fc.shannon,rd), iv=interp(S.fc.day,S.fc.invsimpson,rd),
-        gm=interp(S.fc.day,S.fc.gmhi,rd);
-  const relLbl=`@ ${rd-S.t0>=0?'+':''}${(rd-S.t0).toFixed(0)} d`;
-  $('divAt').textContent=relLbl; $('gmhiAt').textContent=relLbl;
-  $('shannonVal').textContent=sh.toFixed(2);
-  $('invsimpVal').textContent=iv.toFixed(2);
-  const inWin=(o)=>o.day>=S.t0-0.01&&o.day<=S.t0+S.horizon+0.01;
-  sparkLine($('divSpark'), S.fc.day, S.fc.shannon, {color:cvar('--accent'), cursor:rd,
-    obs:S.observed.filter(inWin).map(o=>[o.day,o.shannon])});
-  $('gmhiVal').textContent=gm.toFixed(0);
-  const fill=$('gmhiFill'); fill.style.width=gm+'%';
-  fill.style.background = gm>=60?cvar('--good'):gm>=35?cvar('--warning'):cvar('--critical');
-  sparkLine($('gmhiSpark'), S.fc.day, S.fc.gmhi, {min:0,max:100,color:cvar('--accent2'),cursor:rd,
-    obs:S.observed.filter(inWin).map(o=>[o.day,o.gmhi])});
+// --------------------------------------------------------------------- //
+//  guided tutorial — a top-to-bottom, left-to-right spotlight tour of the
+//  explorer. Each step highlights one real element (a "cutout" through a
+//  dimmed backdrop, built from four blocker rectangles so the background
+//  stays inert while the highlighted element itself is still fully live —
+//  the patient-search step genuinely drives selectPatient()), with a
+//  pointer-bubble explaining it. Steps are computed fresh each time the
+//  tour opens so the patient-search prompt reflects whoever's on screen.
+// --------------------------------------------------------------------- //
+const TUT = { steps:[], idx:0, active:false, waitTimer:null, reflow:null };
+
+function tutorialSteps(){
+  const targetPid = String(S.pid)==='557' ? '780' : '557';
+  return [
+    { title:'Welcome to the pNODE Explorer', body:
+      `This tool forecasts how an allo-HCT patient's gut microbiome composition will change under different antibiotic regimens. This short tour walks through every panel, top to bottom — click <b>Next</b> to begin.` },
+    { target:'#patientCtl', focus:'#patientSearch', title:'Find a patient', body:
+      `Type an ID here to switch patients. <b>Try it:</b> search for and select patient <b>${targetPid}</b>.`,
+      waitFor:()=>String(S.pid)===targetPid, waitHint:`Waiting for you to open patient ${targetPid}…`, doneHint:'Nice — moved on.' },
+    { target:'#sampleCtl', title:'16S sample', body:
+      `Every patient has one or more real stool samples. The forecast always starts from whichever sample is selected here — switching it re-runs the model from that day forward.` },
+    { target:'#themeBtn', title:'Light / dark', body:
+      `Toggles the color theme. Every chart, including the taxa palette, adapts automatically.` },
+    { target:'#trajPanel', title:'Predicted microbiome composition', body:
+      `The pNODE model's forecast: every genus stacked from the selected sample onward. The bold, glowing dark-green line is <b>Enterococcus BSI risk</b> — a ${enteroRiskWindowDays()}-day trailing mean of predicted Enterococcus abundance, so it climbs when Enterococcus is high and falls when it's low. Click or drag anywhere on the chart to move the readout cursor (the dotted line).` },
+    { target:'#obsPanel', expand:'obsPanel', title:'Observed microbiome composition', body:
+      `The patient's actual measured 16S samples, plotted on the same day axis as the forecast, so you can compare prediction against reality.` },
+    { target:'#abxPanel', title:'Antibiotic timeline', body:
+      `Drag on a lane to add a course of that drug class; click a bar to remove it. Every edit immediately re-runs the forecast. <b>Try it:</b> drag on an empty lane, then use <b>Reset to actual regimen</b> to undo it. This chart, the two composition charts above, and the taxUMAP below all share one day axis — scroll any one of them and the others scroll with it.` },
+    { target:'#tuPanel', expand:'tuPanel', title:'TaxUMAP community map', body:
+      `A fixed 2-D map of community types, built from thousands of real samples. The bright dot is the forecast's current position; drag it (or the readout cursor elsewhere) to walk it along the predicted path.` },
+    { target:'#flowToggleLbl', expand:'tuPanel', title:'Flow lines & perturbations', body:
+      `Turn on <b>Show flow lines</b> to reveal a map-wide arrow field showing where the model predicts communities drift under sustained antibiotic exposure — independent of the current patient. With nothing checked it shows natural drift with no antibiotics; check boxes under <b>Perturbations</b> to see how each drug class reshapes that flow.` },
+    { title:"That's the tour", body:
+      `Reopen this any time from the <b>Tutorial</b> button at the top of the screen. Go explore a patient.` },
+  ];
 }
 
-function sparkLine(svg, days, arr, opt={}){
-  const w=svg.clientWidth||280, h=34; svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
-  svg.innerHTML='';
-  const mn=opt.min!==undefined?opt.min:Math.min(...arr);
-  const mx=opt.max!==undefined?opt.max:Math.max(...arr)*1.05||1;
-  const X=d=>2+(d-days[0])/(days[days.length-1]-days[0])*(w-4);
-  const Y=v=>h-2-(v-mn)/(mx-mn||1)*(h-4);
-  const g=el('g');
-  if(opt.thr!==undefined) g.appendChild(el('line',{x1:2,y1:Y(opt.thr),x2:w-2,y2:Y(opt.thr),class:'thr-line'}));
-  if(opt.base){ g.appendChild(el('path',{class:'baseline-trace',
-    d:'M'+days.map((d,i)=>`${X(d).toFixed(1)},${Y(opt.base[i]).toFixed(1)}`).join('L')})); }
-  g.appendChild(el('path',{fill:'none',stroke:opt.color,'stroke-width':1.8,
-    d:'M'+days.map((d,i)=>`${X(d).toFixed(1)},${Y(arr[i]).toFixed(1)}`).join('L')}));
-  if(opt.obs) opt.obs.forEach(([d,v])=>{
-    if(d<days[0]||d>days[days.length-1]) return;
-    g.appendChild(el('circle',{cx:X(d),cy:Y(v),r:2.6,fill:cvar('--ink'),
-      stroke:opt.color,'stroke-width':1.3}));
-  });
-  if(opt.cursor!==undefined){
-    g.appendChild(el('line',{x1:X(opt.cursor),y1:0,x2:X(opt.cursor),y2:h,class:'readout-line'}));
-    g.appendChild(el('circle',{cx:X(opt.cursor),cy:Y(interp(days,arr,opt.cursor)),r:3,
-      fill:opt.color,class:'cur-dot'}));
+function tutorialLabel(){ $('tutStepCount').textContent=(TUT.idx+1)+' / '+TUT.steps.length; }
+
+function tutorialRenderStep(){
+  const step=TUT.steps[TUT.idx];
+  $('tutTitle').innerHTML=step.title;
+  $('tutBody').innerHTML=step.body;
+  tutorialLabel();
+  $('tutPrevBtn').disabled = TUT.idx===0;
+  $('tutNextBtn').textContent = TUT.idx===TUT.steps.length-1 ? 'Finish' : 'Next ▶';
+  const hint=$('tutActionHint');
+  if(step.waitFor){ hint.textContent=step.waitHint||''; hint.classList.remove('hidden'); }
+  else hint.classList.add('hidden');
+  if(step.expand){ const p=$(step.expand); if(p && p.classList.contains('collapsed')) p.querySelector('.panel-toggle').click(); }
+  const target = step.target ? document.querySelector(step.target) : null;
+  if(target) target.scrollIntoView({block:'center', behavior:'instant'});
+  if(step.focus){ const f=document.querySelector(step.focus); if(f) f.focus(); }
+  requestAnimationFrame(()=>requestAnimationFrame(tutorialPosition));
+  clearTimeout(TUT.waitTimer);
+  if(step.waitFor) tutorialPoll();
+}
+
+function tutorialPoll(){
+  const step=TUT.steps[TUT.idx];
+  if(!TUT.active || !step || !step.waitFor) return;
+  tutorialPosition();   // re-measure every tick — catches the patient dropdown opening/filtering
+  if(step.waitFor()){
+    $('tutActionHint').textContent = step.doneHint || 'Nice — moving on…';
+    $('tutRing').classList.remove('waiting');
+    TUT.waitTimer=setTimeout(()=>{ if(TUT.active) tutorialNext(); }, 800);
+    return;
   }
-  svg.appendChild(g);
+  $('tutRing').classList.add('waiting');
+  TUT.waitTimer=setTimeout(tutorialPoll, 350);
+}
+
+// the target's own rect, unioned with any open (non-hidden) dropdown inside
+// it — dropdowns are position:absolute so they don't expand their parent's
+// natural bounding rect, but they still need to sit inside the spotlight
+// cutout (e.g. the patient-search results list) or the blockers swallow clicks on them
+function tutorialTargetRect(target){
+  let r=target.getBoundingClientRect();
+  const dd=target.querySelector('.dropdown:not(.hidden)');
+  if(dd){
+    const dr=dd.getBoundingClientRect();
+    r={ top:Math.min(r.top,dr.top), left:Math.min(r.left,dr.left),
+        right:Math.max(r.right,dr.right), bottom:Math.max(r.bottom,dr.bottom) };
+  }
+  return r;
+}
+function setRect(elm,x,y,w,h){ elm.style.left=x+'px'; elm.style.top=y+'px'; elm.style.width=Math.max(0,w)+'px'; elm.style.height=Math.max(0,h)+'px'; }
+
+function tutorialPosition(){
+  if(!TUT.active) return;
+  const step=TUT.steps[TUT.idx];
+  const vw=window.innerWidth, vh=window.innerHeight;
+  const target = step.target ? document.querySelector(step.target) : null;
+  const ring=$('tutRing'), card=$('tutCard');
+  if(!target){
+    setRect($('tutTop'),0,0,vw,vh); setRect($('tutBottom'),0,vh,vw,0);
+    setRect($('tutLeft'),0,0,0,vh); setRect($('tutRight'),vw,0,0,vh);
+    ring.style.display='none';
+    card.dataset.arrow='none';
+    const cw=card.offsetWidth||328, ch=card.offsetHeight||140;
+    card.style.left=((vw-cw)/2)+'px'; card.style.top=((vh-ch)/2)+'px';
+    return;
+  }
+  ring.style.display='block';
+  const pad=7, r=tutorialTargetRect(target);
+  const top=Math.max(0,r.top-pad), left=Math.max(0,r.left-pad),
+        right=Math.min(vw,r.right+pad), bottom=Math.min(vh,r.bottom+pad);
+  setRect($('tutTop'),0,0,vw,top);
+  setRect($('tutBottom'),0,bottom,vw,vh-bottom);
+  setRect($('tutLeft'),0,top,left,bottom-top);
+  setRect($('tutRight'),right,top,vw-right,bottom-top);
+  setRect(ring,left,top,right-left,bottom-top);
+  if(!step.waitFor) ring.classList.remove('waiting');
+  const gap=14, cw=card.offsetWidth||328, ch=card.offsetHeight||140;
+  let place,x,y;
+  if(bottom+gap+ch<=vh){ place='bottom'; x=left; y=bottom+gap; }
+  else if(top-gap-ch>=0){ place='top'; x=left; y=top-gap-ch; }
+  else if(right+gap+cw<=vw){ place='right'; x=right+gap; y=Math.max(8,top); }
+  else { place='left'; x=Math.max(8,left-gap-cw); y=Math.max(8,top); }
+  x=clamp(x,8,Math.max(8,vw-cw-8)); y=clamp(y,8,Math.max(8,vh-ch-8));
+  card.style.left=x+'px'; card.style.top=y+'px'; card.dataset.arrow=place;
+  card.style.setProperty('--arrow-x', clamp((left+right)/2-x,16,cw-16)+'px');
+}
+
+function tutorialNext(){ if(TUT.idx>=TUT.steps.length-1){ tutorialEnd(); return; } TUT.idx++; tutorialRenderStep(); }
+function tutorialPrev(){ if(TUT.idx<=0) return; TUT.idx--; tutorialRenderStep(); }
+
+function tutorialStart(){
+  TUT.steps=tutorialSteps(); TUT.idx=0; TUT.active=true;
+  $('tutOverlay').classList.remove('hidden');
+  tutorialRenderStep();
+  if(!TUT.reflow){
+    TUT.reflow=()=>{ if(TUT.active) tutorialPosition(); };
+    window.addEventListener('resize', TUT.reflow);
+    $('stage').addEventListener('scroll', TUT.reflow);
+  }
+}
+function tutorialEnd(){
+  TUT.active=false; clearTimeout(TUT.waitTimer);
+  $('tutOverlay').classList.add('hidden');
+}
+
+function setupTutorial(){
+  $('tutorialBtn').addEventListener('click', tutorialStart);
+  $('tutCloseBtn').addEventListener('click', tutorialEnd);
+  $('tutExitBtn').addEventListener('click', tutorialEnd);
+  $('tutNextBtn').addEventListener('click', tutorialNext);
+  $('tutPrevBtn').addEventListener('click', tutorialPrev);
+  window.addEventListener('keydown',(e)=>{
+    if(!TUT.active) return;
+    if(e.key==='Escape') tutorialEnd();
+    else if(e.key==='ArrowRight') tutorialNext();
+    else if(e.key==='ArrowLeft') tutorialPrev();
+  });
 }
 
 init().catch(e=>{ console.error(e); alert('init failed: '+e.message); });

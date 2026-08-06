@@ -38,6 +38,10 @@
       loadJSON('bsi.json').catch(() => ({})),
     ]);
     MODEL = m; META = meta; PIDX = pidx; BSI = bsi || {};
+    // surface the model's risk window (days) through /api/meta so the front end
+    // can size the Enterococcus BSI risk rolling-mean overlay identically to how
+    // the model itself defines "dominated" risk, without duplicating the value.
+    META.risk_window = m.risk_window; META.dom_thresh = m.dom_thresh;
     MODEL.W1 = Float64Array.from(m.W1); MODEL.b1 = Float64Array.from(m.b1);
     MODEL.W2 = Float64Array.from(m.W2); MODEL.b2 = Float64Array.from(m.b2);
     MODEL.W3 = Float64Array.from(m.W3); MODEL.b3 = Float64Array.from(m.b3);
