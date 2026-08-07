@@ -602,12 +602,19 @@ function renderTaxumap(){
   if(w<10||h<10) return;
   const sizeChanged=!_tu||_tu.w!==w||_tu.h!==h;
   if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(false); }
-  // legend + path both depend on the current patient's forecast (and BSI events)
-  if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); drawTaxumapLegend(); }
+  // the expensive part (TAXUMAP.project, ~90 calls) only runs when the
+  // forecast actually changes; the cheap screen remap always runs below
+  if(_tu.fc!==S.fc){ _tu.fc=S.fc; computeTaxumapPathData(); drawTaxumapLegend(); }
+  renderTaxumapPathSvg();
   taxumapMoveDot();
   syncPerturbToAdministered();
   drawFlowField(false);
-  $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom';
+  // the flow field now fills in progressively over a few frames instead of
+  // blocking (see startFlowFieldRecompute) — say so on the first-ever fill,
+  // when there's nothing on screen yet, so it doesn't read as broken
+  $('tuHint').textContent = (S.flowOn && _flowPending && !_flowCache.vectors)
+    ? 'computing flow field…'
+    : 'drag the ● to move along the predicted path · scroll to zoom';
 }
 
 // _tuBase holds the fixed "fit the whole reference cloud" transform (zoom=1,
@@ -657,10 +664,18 @@ function visibleDataBounds(){
 let _tuZoomRAF=null, _tuSettleT=null;
 function setupTaxumapZoom(){
   const wrap=$('taxumapWrap');
+  const fCanvas=$('flowCanvas');
+  // getBoundingClientRect() forces a layout if anything on the page is
+  // layout-dirty — cheap in isolation, but wasteful to pay on every single
+  // wheel tick of a gesture when the container isn't moving. Cache it for
+  // the duration of a gesture and only re-measure once scrolling has fully
+  // stopped (a resize mid-gesture is not a real scenario here).
+  let rectCache=null, fCanvasDimmed=false;
   wrap.addEventListener('wheel',(e)=>{
     if(!_tu||!_tuBase) return;
     e.preventDefault(); e.stopPropagation();
-    const r=wrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    if(!rectCache) rectCache=wrap.getBoundingClientRect();
+    const mx=e.clientX-rectCache.left, my=e.clientY-rectCache.top;
     const oldZoom=S.tuZoom;
     const factor=Math.exp(-e.deltaY*0.0016);
     const newZoom=clamp(oldZoom*factor, 1, 14);
@@ -675,9 +690,9 @@ function setupTaxumapZoom(){
     // integrator — that's what keeps the gesture itself smooth. The real,
     // crisp recompute of both happens once the gesture settles, below.
     _tuZoomRAF=requestAnimationFrame(()=>{
-      drawTaxumapBackdrop(true); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(true);
+      drawTaxumapBackdrop(true); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(true);
     });
-    const fCanvas=$('flowCanvas'); if(fCanvas) fCanvas.style.opacity='0.5';
+    if(fCanvas && !fCanvasDimmed){ fCanvas.style.opacity='0.5'; fCanvasDimmed=true; }
     clearTimeout(_tuSettleT);
     _tuSettleT=setTimeout(()=>{
       if(!isExpanded('tuPanel')) return;
@@ -691,12 +706,13 @@ function setupTaxumapZoom(){
         S.tuZoom/_flowLastZoom > FLOW_RECOMPUTE_ZOOM_FACTOR ||
         S.tuZoom/_flowLastZoom < 1/FLOW_RECOMPUTE_ZOOM_FACTOR;
       drawFlowField(!movedEnough);
-      if(fCanvas) fCanvas.style.opacity='1';
+      if(fCanvas){ fCanvas.style.opacity='1'; fCanvasDimmed=false; }
+      rectCache=null;   // re-measure lazily next gesture, in case of a resize meanwhile
     }, 160);
   }, {passive:false});
   wrap.addEventListener('dblclick', ()=>{
     S.tuZoom=1; S.tuPan={x:0,y:0};
-    if(isExpanded('tuPanel')){ drawTaxumapBackdrop(false); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(false); }
+    if(isExpanded('tuPanel')){ drawTaxumapBackdrop(false); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(false); }
   });
 }
 
@@ -736,10 +752,16 @@ function drawTaxumapBackdrop(fromCache){
   const info=TAXUMAP.info();
   const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
   const dotR=lerp(0.9, 2.0, tuLod());
+  // zoomed all the way out, the ~10k-point cloud is squeezed into one small
+  // viewport and reads as a dense blob anyway — skip most of it (a stable
+  // index stride, not random, so the same points draw every redraw and
+  // nothing flickers) and show the full cloud once zoomed in enough that
+  // individual points are actually distinguishable
+  const stride=Math.round(lerp(4, 1, tuLod()));
   // group by fill color so the whole cloud is a handful of fill() calls
   // instead of one beginPath/arc/fill per point
   const byColor=new Map();
-  for(let i=0;i<cls.length;i++){
+  for(let i=0;i<cls.length;i+=stride){
     const col=colors[cls[i]]||'#888';
     if(!byColor.has(col)) byColor.set(col,[]);
     byColor.get(col).push(i);
@@ -767,20 +789,36 @@ function drawTaxumapBackdrop(fromCache){
   _tuBackdropSnap={canvas:snap, zoom:S.tuZoom, pan:{x:S.tuPan.x,y:S.tuPan.y}};
 }
 
-// projects a subsample of the predicted trajectory (~1 point/day) and caches
-// the screen-space points + their days on _tu, both for drawing the path and
-// for hit-testing the readout dot drag (nearestTaxumapIndex / taxumapMoveDot)
-function drawTaxumapPath(){
-  const svg=$('taxumapSvg'); const old=svg.querySelector('.tu-path'); if(old) old.remove();
-  _tu.pts=null; _tu.days=null;
+// TAXUMAP.project() is an O(nRef≈10k) kNN search (~1.6ms/call) — projecting
+// the ~90-point trajectory subsample cost ~137ms measured end to end, and
+// the old code re-ran that on EVERY zoom animation frame (independent of
+// whether flow lines were even on), which was the real source of the
+// reported zoom stutter. The projection is a function of the patient's
+// forecast alone — it doesn't depend on zoom/pan/size at all — so it only
+// needs to run when the forecast changes; renderTaxumapPathSvg() below does
+// the actual per-frame work (just remapping ~90 cached points through the
+// current _tu.map()), which is cheap enough to call on every frame.
+function computeTaxumapPathData(){
+  _tu.dataPts=null; _tu.days=null;
   if(!S.fc||!S.fc.fullComp||!S.fc.fullComp.length) return;
   const comps=S.fc.fullComp, days=S.fc.day;
   const step=Math.max(1,Math.round(comps.length/90));
   const idxs=[];
   for(let i=0;i<comps.length;i+=step) idxs.push(i);
   if(idxs[idxs.length-1]!==comps.length-1) idxs.push(comps.length-1);
-  const pts=idxs.map(i=>{ const z=TAXUMAP.project(comps[i]); return z?_tu.map(z[0],z[1]):null; });
-  _tu.pts=pts; _tu.days=idxs.map(i=>days[i]);
+  _tu.dataPts=idxs.map(i=>TAXUMAP.project(comps[i]));   // data-space [x,y] or null; zoom-independent
+  _tu.days=idxs.map(i=>days[i]);
+}
+
+// cheap per-frame part: remaps the cached data-space trajectory points
+// through the CURRENT _tu.map() and redraws the SVG — safe to call on every
+// zoom/pan frame since it does no TAXUMAP.project() calls at all.
+function renderTaxumapPathSvg(){
+  const svg=$('taxumapSvg'); const old=svg.querySelector('.tu-path'); if(old) old.remove();
+  _tu.pts=null;
+  if(!_tu.dataPts) return;
+  const pts=_tu.dataPts.map(z=>z?_tu.map(z[0],z[1]):null);
+  _tu.pts=pts;
   const g=el('g',{class:'tu-path'});
   const valid=pts.filter(Boolean);
   if(valid.length>1){
@@ -791,7 +829,7 @@ function drawTaxumapPath(){
   }
   // BSI event dots: place each event on the path point nearest its day
   (S.bsiEvents||[]).forEach(ev=>{
-    if(!_tu.days.length) return;
+    if(!_tu.days || !_tu.days.length) return;
     if(ev.day < _tu.days[0]-1e-3 || ev.day > _tu.days[_tu.days.length-1]+1e-3) return;
     let bi=0, bd=Infinity;
     for(let i=0;i<_tu.days.length;i++){ const dd=Math.abs(_tu.days[i]-ev.day); if(dd<bd){bd=dd;bi=i;} }
@@ -917,37 +955,70 @@ function activePerturbationSchedule(){
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
   return sched;
 }
-function computeFlowField(bounds){
-  if(!window.TAXUMAP || !TAXUMAP.ready() || !window.__tipnodeForecast) return null;
+
+// A full recompute calls TAXUMAP.project() (the ~1.6ms O(nRef) kNN search)
+// once per sample point — up to FLOW_GRID² of them — which measured out to
+// ~500-700ms of solid main-thread work: long enough to freeze the tab for a
+// beat right as a zoom gesture settles. Rather than run it all in one go, it
+// runs in small time-boxed batches spread across animation frames (the same
+// idea as React's time-slicing, or how a map tile loads progressively
+// instead of blocking the map): each batch runs for at most
+// FLOW_CHUNK_BUDGET_MS before yielding back to the browser, so the page
+// stays responsive and the current frame rate doesn't drop, even though the
+// field itself takes a few more frames in wall-clock time to finish.
+const FLOW_CHUNK_BUDGET_MS = 10;
+let _flowPending=null;   // {key, idxs, i, vectors, N, schedule, info, bounds}
+
+function startFlowFieldRecompute(bounds, key){
+  // never abandon in-progress work for a newer key — under a fast/jittery
+  // gesture the target can keep moving before one batch even finishes, and
+  // restarting from scratch each time (re-running pickFlowSamplePoints,
+  // throwing away whatever samples were already computed) was turning a few
+  // big stalls into many smaller ones instead of actually finishing faster.
+  // Once the current computation completes, flowChunkStep() re-checks against
+  // whatever the state is BY THEN and kicks off a fresh one if still stale —
+  // so requests naturally coalesce onto the latest target instead of racing.
+  if(_flowPending) return;
   const N = S.fc && S.fc.fullComp && S.fc.fullComp[0] ? S.fc.fullComp[0].length : null;
-  if(!N) return null;
-  const pkey = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
-  const bkey = bounds.map(v=>v.toFixed(3)).join(',');
-  const key = pkey+'|'+bkey;
-  if(_flowCache.key===key && _flowCache.vectors) return _flowCache;
+  if(!N) return;
   const info = TAXUMAP.info();
   const idxs = pickFlowSamplePoints(info, bounds);
   const schedule = activePerturbationSchedule();
-  const vectors=[];
-  for(const r of idxs){
-    const x0=new Float64Array(N);
-    for(let p=info.gptr[r]; p<info.gptr[r+1]; p++) x0[info.genI[p]]=info.gVal[p];
+  _flowPending={key, idxs, i:0, vectors:[], N, schedule, info, bounds};
+  requestAnimationFrame(flowChunkStep);
+}
+
+function flowChunkStep(){
+  const p=_flowPending; if(!p) return;
+  const t0=performance.now();
+  while(p.i<p.idxs.length && performance.now()-t0<FLOW_CHUNK_BUDGET_MS){
+    const r=p.idxs[p.i++];
+    const x0=new Float64Array(p.N);
+    for(let g=p.info.gptr[r]; g<p.info.gptr[r+1]; g++) x0[p.info.genI[g]]=p.info.gVal[g];
     let fc;
-    try{ fc=window.__tipnodeForecast(x0,0,FLOW_DT,schedule); }
+    try{ fc=window.__tipnodeForecast(x0,0,FLOW_DT,p.schedule); }
     catch(e){ continue; }
     const comp2=fc.fullComp[fc.fullComp.length-1];
     const p1=TAXUMAP.project(comp2);
     if(!p1) continue;
-    const x0d=info.knnCoords[2*r], y0d=info.knnCoords[2*r+1];
+    const x0d=p.info.knnCoords[2*r], y0d=p.info.knnCoords[2*r+1];
     if(Math.hypot(p1[0]-x0d,p1[1]-y0d)<FLOW_MIN_DRIFT) continue;
-    vectors.push([x0d,y0d,p1[0],p1[1]]);
+    p.vectors.push([x0d,y0d,p1[0],p1[1]]);
   }
-  const dirs = smoothFlowDirections(vectors);
-  const rawMag = vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
-  const streamlines = buildStreamlines(vectors, dirs, bounds);
-  _flowCache={key, vectors, dirs, streamlines, rawMag};
+  if(p.i<p.idxs.length){
+    requestAnimationFrame(flowChunkStep);
+    return;
+  }
+  const dirs = smoothFlowDirections(p.vectors);
+  const rawMag = p.vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
+  const streamlines = buildStreamlines(p.vectors, dirs, p.bounds);
+  _flowCache={key:p.key, vectors:p.vectors, dirs, streamlines, rawMag};
   _flowLastZoom=S.tuZoom;
-  return _flowCache;
+  _flowPending=null;
+  if(S.flowOn && isExpanded('tuPanel')){
+    drawFlowField(false);   // paint the finished field
+    $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom';
+  }
 }
 
 // spatially smooth each vector's direction against its neighbours (inverse-
@@ -1101,17 +1172,7 @@ function drawTaperedStreamline(ctx, rawPts, baseWidth){
   ctx.closePath(); ctx.fill();
 }
 
-// draws the current flow field. `fromCache`=true (used while a zoom gesture
-// is still in flight) re-projects the already-cached streamlines — traced in
-// DATA space — through the current pan/zoom instead of retracing them, so
-// the gesture itself stays smooth; the real recompute (which re-runs the ODE
-// integrator and re-traces every streamline) happens once it settles.
-function drawFlowField(fromCache){
-  clearFlowCanvas();
-  if(!S.flowOn || !_tu) return;
-  const bounds = fromCache && _flowCache.vectors ? null : visibleDataBounds();
-  const cache = fromCache && _flowCache.vectors ? _flowCache : computeFlowField(bounds);
-  if(!cache || !cache.streamlines || !cache.streamlines.length) return;
+function renderFlowFieldStreamlines(cache){
   const ctx=$('flowCanvas').getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   ctx.fillStyle=cvar('--flow');
@@ -1129,6 +1190,26 @@ function drawFlowField(fromCache){
     drawTaperedStreamline(ctx, screenPts, baseW*(isBranch?0.72:1));
   });
   ctx.globalAlpha=1;
+}
+
+// draws the current flow field. `fromCache`=true (used while a zoom gesture
+// is still in flight) re-projects the already-cached streamlines — traced in
+// DATA space — through the current pan/zoom instead of retracing them, so
+// the gesture itself stays smooth. When a real recompute IS needed (new
+// bounds/perturbations, past the zoom-ratio threshold), it never blocks: the
+// last-known field keeps rendering while startFlowFieldRecompute() fills in
+// the new one across a few animation frames in the background (see above),
+// then flowChunkStep() calls back in here once it's done.
+function drawFlowField(fromCache){
+  clearFlowCanvas();
+  if(!S.flowOn || !_tu) return;
+  if(fromCache && _flowCache.vectors){ renderFlowFieldStreamlines(_flowCache); return; }
+  const bounds = visibleDataBounds();
+  const pkey = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
+  const bkey = bounds.map(v=>v.toFixed(3)).join(',');
+  const key = pkey+'|'+bkey;
+  if(_flowCache.key!==key || !_flowCache.vectors) startFlowFieldRecompute(bounds, key);
+  if(_flowCache.vectors) renderFlowFieldStreamlines(_flowCache);   // last-known field, even if stale
 }
 
 // current antibiotic classes active in S.schedule at day `day` (interval-membership test)
