@@ -601,7 +601,7 @@ function renderTaxumap(){
   const w=wrap.clientWidth, h=wrap.clientHeight;
   if(w<10||h<10) return;
   const sizeChanged=!_tu||_tu.w!==w||_tu.h!==h;
-  if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(); }
+  if(sizeChanged){ setupTaxumapMap(w,h); drawTaxumapBackdrop(false); }
   // legend + path both depend on the current patient's forecast (and BSI events)
   if(sizeChanged || _tu.fc!==S.fc){ _tu.fc=S.fc; drawTaxumapPath(); drawTaxumapLegend(); }
   taxumapMoveDot();
@@ -654,7 +654,7 @@ function visibleDataBounds(){
 // the backdrop/path/dot immediately (cheap) on every tick, but only
 // recompute the flow field's sample points/vectors (the expensive part)
 // once scrolling settles, at whatever resolution the new zoom level implies.
-let _tuZoomRAF=null, _tuFlowSettleT=null;
+let _tuZoomRAF=null, _tuSettleT=null;
 function setupTaxumapZoom(){
   const wrap=$('taxumapWrap');
   wrap.addEventListener('wheel',(e)=>{
@@ -670,30 +670,83 @@ function setupTaxumapZoom(){
     S.tuPan.y = my - (my-S.tuPan.y)/oldZoom*newZoom;
     S.tuZoom = newZoom;
     if(_tuZoomRAF) cancelAnimationFrame(_tuZoomRAF);
+    // in-flight: re-transform the cached backdrop bitmap and re-project the
+    // cached streamlines instead of touching the 10k-point cloud or the ODE
+    // integrator — that's what keeps the gesture itself smooth. The real,
+    // crisp recompute of both happens once the gesture settles, below.
     _tuZoomRAF=requestAnimationFrame(()=>{
-      drawTaxumapBackdrop(); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(true);
+      drawTaxumapBackdrop(true); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(true);
     });
-    clearTimeout(_tuFlowSettleT);
-    _tuFlowSettleT=setTimeout(()=>{ if(isExpanded('tuPanel')) drawFlowField(false); }, 160);
+    const fCanvas=$('flowCanvas'); if(fCanvas) fCanvas.style.opacity='0.5';
+    clearTimeout(_tuSettleT);
+    _tuSettleT=setTimeout(()=>{
+      if(!isExpanded('tuPanel')) return;
+      drawTaxumapBackdrop(false);   // one crisp redraw + a fresh cache snapshot
+      drawFlowField(false);          // one real field recompute at the new resolution
+      if(fCanvas) fCanvas.style.opacity='1';
+    }, 160);
   }, {passive:false});
   wrap.addEventListener('dblclick', ()=>{
     S.tuZoom=1; S.tuPan={x:0,y:0};
-    if(isExpanded('tuPanel')){ drawTaxumapBackdrop(); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(false); }
+    if(isExpanded('tuPanel')){ drawTaxumapBackdrop(false); drawTaxumapPath(); taxumapMoveDot(); drawFlowField(false); }
   });
 }
 
-function drawTaxumapBackdrop(){
-  const info=TAXUMAP.info(), ctx=$('taxumapCanvas').getContext('2d');
+// The reference cloud is ~10k points; redrawing all of them every animation
+// frame during a zoom gesture (beginPath/arc/fill x10k, ~60 times/sec) is
+// what made zooming feel sluggish. Instead we rasterize the cloud once,
+// crisp, into an offscreen snapshot at the CURRENT zoom/pan, and while a
+// gesture is in flight (fromCache=true) we just re-transform that single
+// bitmap with drawImage — an O(1) op regardless of point count, since the
+// map/pan/zoom is a pure affine transform (uniform scale + translate, no
+// rotation), a cached raster can be re-scaled/re-translated and stay pixel-
+// exact modulo raster resolution. The snapshot is refreshed (one real
+// 10k-point redraw) once the gesture settles, so the map always ends up
+// pixel-crisp; only the handful of frames mid-gesture trade a touch of
+// raster softness for staying smooth — the same tradeoff map apps make.
+let _tuBackdropSnap=null;   // {canvas, zoom, pan}
+function drawTaxumapBackdrop(fromCache){
+  const ctx=$('taxumapCanvas').getContext('2d');
+  if(fromCache && _tuBackdropSnap){
+    const scale=S.tuZoom/_tuBackdropSnap.zoom;
+    const tx=S.tuPan.x - scale*_tuBackdropSnap.pan.x, ty=S.tuPan.y - scale*_tuBackdropSnap.pan.y;
+    ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+    ctx.clearRect(0,0,_tu.w,_tu.h);
+    ctx.setTransform(_tu.dpr*scale,0,0,_tu.dpr*scale, _tu.dpr*tx, _tu.dpr*ty);
+    ctx.drawImage(_tuBackdropSnap.canvas, 0, 0, _tu.w, _tu.h);
+    return;
+  }
+  const info=TAXUMAP.info();
+  const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
+  // group by fill color so the whole cloud is a handful of fill() calls
+  // instead of one beginPath/arc/fill per point
+  const byColor=new Map();
+  for(let i=0;i<cls.length;i++){
+    const col=colors[cls[i]]||'#888';
+    if(!byColor.has(col)) byColor.set(col,[]);
+    byColor.get(col).push(i);
+  }
+  const paint=(ctx2)=>{
+    ctx2.globalAlpha=0.32;
+    for(const [col,idxs] of byColor){
+      ctx2.fillStyle=col; ctx2.beginPath();
+      for(const i of idxs){
+        const p=_tu.map(bd[2*i],bd[2*i+1]);
+        ctx2.moveTo(p[0]+2.0,p[1]); ctx2.arc(p[0],p[1],2.0,0,6.2832);
+      }
+      ctx2.fill();
+    }
+    ctx2.globalAlpha=1;
+  };
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   ctx.clearRect(0,0,_tu.w,_tu.h);
-  const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
-  ctx.globalAlpha=0.32;
-  for(let i=0;i<cls.length;i++){
-    const p=_tu.map(bd[2*i],bd[2*i+1]);
-    ctx.fillStyle=colors[cls[i]]||'#888';
-    ctx.beginPath(); ctx.arc(p[0],p[1],2.0,0,6.2832); ctx.fill();
-  }
-  ctx.globalAlpha=1;
+  paint(ctx);
+  const snap=document.createElement('canvas');
+  snap.width=Math.round(_tu.w*_tu.dpr); snap.height=Math.round(_tu.h*_tu.dpr);
+  const sctx=snap.getContext('2d');
+  sctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+  paint(sctx);
+  _tuBackdropSnap={canvas:snap, zoom:S.tuZoom, pan:{x:S.tuPan.x,y:S.tuPan.y}};
 }
 
 // projects a subsample of the predicted trajectory (~1 point/day) and caches
@@ -797,21 +850,28 @@ function drawTaxumapLegend(){
 //  TaxUMAP flow field — a map-wide vector field showing where community
 //  composition is predicted to DRIFT under a fixed, constant antibiotic
 //  exposure (the toggled "Perturbations"), independent of any one patient.
-//  For a spatial sample of the TaxUMAP reference profiles, each arrow runs
-//  the SAME validated pNODE integrator (window.__tipnodeForecast) forward
-//  FLOW_DT days holding the toggled classes continuously "on" from a real
-//  reference composition, then re-projects the resulting composition back
-//  onto the map — the arrow is the reference point's real position pointing
-//  at where the model predicts it would end up.
+//  For a spatial sample of the TaxUMAP reference profiles, each SEED point
+//  runs the SAME validated pNODE integrator (window.__tipnodeForecast)
+//  forward FLOW_DT days holding the toggled classes continuously "on" from
+//  a real reference composition, then re-projects the resulting composition
+//  back onto the map. That gives a sparse, ODE-accurate vector at each seed;
+//  everything downstream — the smoothing, the long curved streamlines, the
+//  forks — is cheap interpolation/geometry over those vectors, not more
+//  model calls, so the visual richness below costs almost nothing extra
+//  once the vectors themselves are computed.
 // --------------------------------------------------------------------- //
-const FLOW_DT = 7;            // days of constant exposure integrated per arrow
+const FLOW_DT = 7;            // days of constant exposure integrated per sample vector
 const FLOW_GRID = 22;         // spatial bins per axis, across whatever is currently VISIBLE —
                                // zooming in shrinks the visible data extent, so the same grid
                                // count packs into a smaller area: finer real detail, same on-
                                // screen density, exactly like map-tile LOD.
-const FLOW_ARROW_PX = 17;     // fixed on-screen line length (direction matters, not raw magnitude)
-const FLOW_MIN_DRIFT = 1e-3;  // skip lines for points the model predicts won't move (data-space units)
-const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each tapered flow line
+const FLOW_MIN_DRIFT = 1e-3;  // skip samples the model predicts won't move (data-space units)
+const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each streamline
+const STREAM_SEEDS = 70;          // long curved streamlines drawn (subsampled from the sample vectors)
+const STREAM_STEPS = 16;          // forward integration steps per streamline (data-space, field-guided)
+const STREAM_BRANCH_AT = 7;       // step index where ~1/3 of streamlines fork off a second thread
+const STREAM_BRANCH_LEN = 7;      // steps traced along a fork
+const STREAM_BRANCH_ANGLE = 0.36; // radians (~21°) a fork rotates away from the main flow
 
 // spatial subsample of TaxUMAP reference indices, one per grid cell, restricted
 // to `bounds` (the currently visible data-space region — see visibleDataBounds)
@@ -830,7 +890,7 @@ function pickFlowSamplePoints(info, bounds){
   return [...chosen.values()];
 }
 
-let _flowCache={key:null, vectors:null};
+let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null};
 function activePerturbationSchedule(){
   const sched={};
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
@@ -843,7 +903,7 @@ function computeFlowField(bounds){
   const pkey = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
   const bkey = bounds.map(v=>v.toFixed(3)).join(',');
   const key = pkey+'|'+bkey;
-  if(_flowCache.key===key && _flowCache.vectors) return _flowCache.vectors;
+  if(_flowCache.key===key && _flowCache.vectors) return _flowCache;
   const info = TAXUMAP.info();
   const idxs = pickFlowSamplePoints(info, bounds);
   const schedule = activePerturbationSchedule();
@@ -861,14 +921,18 @@ function computeFlowField(bounds){
     if(Math.hypot(p1[0]-x0d,p1[1]-y0d)<FLOW_MIN_DRIFT) continue;
     vectors.push([x0d,y0d,p1[0],p1[1]]);
   }
-  _flowCache={key,vectors};
-  return vectors;
+  const dirs = smoothFlowDirections(vectors);
+  const rawMag = vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
+  const streamlines = buildStreamlines(vectors, dirs, bounds);
+  _flowCache={key, vectors, dirs, streamlines, rawMag};
+  return _flowCache;
 }
 
 // spatially smooth each vector's direction against its neighbours (inverse-
 // distance weighted) so the field reads as one continuous flow rather than
 // independent arrows — this is the "averaging" that gives streamlines their
-// coherent look, and is recomputed alongside the vectors themselves.
+// coherent look, and is recomputed alongside the vectors themselves (once
+// per settle, not per frame — see drawFlowField).
 function smoothFlowDirections(vectors){
   return vectors.map(([x0,y0,x1,y1],i)=>{
     let wx=0, wy=0, wsum=0;
@@ -884,67 +948,159 @@ function smoothFlowDirections(vectors){
   });
 }
 
+// inverse-distance-weighted direction of the (already-smoothed) field at an
+// arbitrary data-space point — turns the handful of discrete sample vectors
+// into a continuous field a streamline can be traced through.
+function sampleFlowDirection(vectors, dirs, sigma2, x, y){
+  let wx=0, wy=0, wsum=0;
+  for(let j=0;j<vectors.length;j++){
+    const dx=x-vectors[j][0], dy=y-vectors[j][1];
+    const w=1/(1+(dx*dx+dy*dy)/sigma2);
+    wx+=w*dirs[j][0]; wy+=w*dirs[j][1]; wsum+=w;
+  }
+  if(wsum<1e-9) return null;
+  const l=Math.hypot(wx,wy)||1e-9;
+  return [wx/l, wy/l];
+}
+
+// traces STREAM_SEEDS long curved paths through the interpolated field, in
+// DATA space so the traced points stay correct however the view is zoomed/
+// panned afterwards (drawFlowField just re-maps them each frame — see
+// below); a subset fork partway through for the "splits off" look. This
+// only touches the already-computed sample vectors — no extra model calls.
+function buildStreamlines(vectors, dirs, bounds){
+  if(!vectors.length) return [];
+  const [xmin,xmax,ymin,ymax]=bounds;
+  const L=Math.max(xmax-xmin, ymax-ymin)||1;
+  const sigma=(L/FLOW_GRID)*1.4, sigma2=sigma*sigma, stepData=sigma*0.5;
+  const stride=Math.max(1, Math.ceil(vectors.length/STREAM_SEEDS));
+  const lines=[];
+  for(let i=0;i<vectors.length;i+=stride){
+    let x=vectors[i][0], y=vectors[i][1];
+    const main=[[x,y]];
+    let branchAt=null, branchDir=null;
+    for(let s=0;s<STREAM_STEPS;s++){
+      const d=sampleFlowDirection(vectors,dirs,sigma2,x,y); if(!d) break;
+      x+=d[0]*stepData; y+=d[1]*stepData;
+      main.push([x,y]);
+      if(s===STREAM_BRANCH_AT && (i/stride)%3===0){ branchAt=[x,y]; branchDir=d; }
+    }
+    lines.push({pts:main, seed:i});
+    if(branchAt){
+      const sign=((i/stride)%6<3)?1:-1;
+      const c=Math.cos(STREAM_BRANCH_ANGLE*sign), s2=Math.sin(STREAM_BRANCH_ANGLE*sign);
+      let bx=branchAt[0], by=branchAt[1];
+      let bdx=branchDir[0]*c-branchDir[1]*s2, bdy=branchDir[0]*s2+branchDir[1]*c;
+      const branch=[[bx,by]];
+      for(let s=0;s<STREAM_BRANCH_LEN;s++){
+        const d=sampleFlowDirection(vectors,dirs,sigma2,bx,by); if(!d) break;
+        // blend the local field back in so the fork bends with real drift
+        // instead of shooting off in a straight line
+        let dx=d[0]+bdx*0.6, dy=d[1]+bdy*0.6, dl=Math.hypot(dx,dy)||1e-9; dx/=dl; dy/=dl;
+        bx+=dx*stepData; by+=dy*stepData;
+        branch.push([bx,by]); bdx=dx; bdy=dy;
+      }
+      lines.push({pts:branch, seed:i+0.5});
+    }
+  }
+  return lines;
+}
+
 function clearFlowCanvas(){
   const cv=$('flowCanvas'); if(!cv||!_tu) return;
   const ctx=cv.getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0); ctx.clearRect(0,0,_tu.w,_tu.h);
 }
 
-// a smooth, tapered "flow line" (thick at the base, narrowing to a point at
-// the tip, gently bowed) rather than a straight vector arrow — the shape is
-// a filled ribbon traced along a quadratic curve through p0/p1.
-function drawTaperedFlowLine(ctx, p0, p1, baseWidth, bow){
-  const dx=p1[0]-p0[0], dy=p1[1]-p0[1], len=Math.hypot(dx,dy);
-  if(len<0.5) return;
-  const nx=-dy/len, ny=dx/len;
-  const midx=(p0[0]+p1[0])/2+nx*bow*len, midy=(p0[1]+p1[1])/2+ny*bow*len;
-  const N=9, left=[], right=[];
-  for(let i=0;i<=N;i++){
-    const t=i/N, mt=1-t;
-    const bx=mt*mt*p0[0]+2*mt*t*midx+t*t*p1[0];
-    const by=mt*mt*p0[1]+2*mt*t*midy+t*t*p1[1];
-    const tx=2*mt*(midx-p0[0])+2*t*(p1[0]-midx);
-    const ty=2*mt*(midy-p0[1])+2*t*(p1[1]-midy);
-    const tl=Math.hypot(tx,ty)||1, pnx=-ty/tl, pny=tx/tl;
-    const w=baseWidth*0.5*Math.pow(1-t,0.8);
-    left.push([bx+pnx*w, by+pny*w]); right.push([bx-pnx*w, by-pny*w]);
+// Catmull-Rom point on the segment through p1..p2 (p0/p3 shape the tangents)
+// — turns the traced step points into a visually smooth curve rather than a
+// jointed polyline.
+function catmullRom(p0,p1,p2,p3,t){
+  const t2=t*t, t3=t2*t;
+  return [
+    0.5*((2*p1[0])+(-p0[0]+p2[0])*t+(2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+(-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+    0.5*((2*p1[1])+(-p0[1]+p2[1])*t+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3),
+  ];
+}
+function smoothPolyline(pts, perSeg){
+  if(pts.length<3) return pts.slice();
+  const ext=[pts[0], ...pts, pts[pts.length-1]];
+  const out=[];
+  for(let i=0;i<pts.length-1;i++){
+    for(let s=0;s<perSeg;s++) out.push(catmullRom(ext[i],ext[i+1],ext[i+2],ext[i+3], s/perSeg));
   }
+  out.push(pts[pts.length-1]);
+  return out;
+}
+
+// a smooth, tapered streamline ribbon (thick at the base, narrowing along
+// the curve) through arbitrarily many screen-space points, ending in a
+// arrowhead flare — sized in fixed SCREEN pixels (not a fraction of the
+// curve) so it reads clearly whether the streamline is long or a short fork,
+// zoomed in or out — with a sharp point so the drift direction is
+// unambiguous at a glance.
+function drawTaperedStreamline(ctx, rawPts, baseWidth){
+  const pts=smoothPolyline(rawPts, 4);
+  const n=pts.length; if(n<2) return;
+  // find where the head starts by walking back from the tip until we're a
+  // fixed STRAIGHT-LINE (not path-length) distance away — the traced paths
+  // can curl tightly near the field's convergence point, so anchoring on
+  // path length could put "headIdx" only a couple screen pixels from the
+  // tip even after walking back many points, collapsing the flare into a
+  // shapeless blob; Euclidean distance keeps the head a real, visible size
+  // regardless of how much the last stretch of the curve wiggles.
+  const HEAD_LEN=Math.max(9, baseWidth*2.3);
+  const tip=pts[n-1];
+  let headIdx=0;
+  for(let i=n-2;i>=0;i--){
+    headIdx=i;
+    if(Math.hypot(pts[i][0]-tip[0], pts[i][1]-tip[1])>=HEAD_LEN) break;
+  }
+  const left=[], right=[];
+  for(let i=0;i<=headIdx;i++){
+    const t=headIdx>0 ? i/headIdx : 0;
+    const p=pts[i], pa=pts[Math.max(0,i-1)], pb=pts[Math.min(n-1,i+1)];
+    let tx=pb[0]-pa[0], ty=pb[1]-pa[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const nx=-ty, ny=tx, w=baseWidth*0.5*Math.pow(1-t*0.7,0.8);
+    left.push([p[0]+nx*w, p[1]+ny*w]); right.push([p[0]-nx*w, p[1]-ny*w]);
+  }
+  const hb=pts[headIdx];
+  let htx=tip[0]-hb[0], hty=tip[1]-hb[1]; const htl=Math.hypot(htx,hty)||1e-6; htx/=htl; hty/=htl;
+  const hnx=-hty, hny=htx, flareW=baseWidth*0.95;   // wider than the shaft: the arrow's "wings"
   ctx.beginPath();
-  ctx.moveTo(left[0][0],left[0][1]);
-  for(let i=1;i<left.length;i++) ctx.lineTo(left[i][0],left[i][1]);
+  if(left.length){
+    ctx.moveTo(left[0][0],left[0][1]);
+    for(let i=1;i<left.length;i++) ctx.lineTo(left[i][0],left[i][1]);
+  } else ctx.moveTo(hb[0]+hnx*flareW, hb[1]+hny*flareW);
+  ctx.lineTo(hb[0]+hnx*flareW, hb[1]+hny*flareW);
+  ctx.lineTo(tip[0], tip[1]);                       // arrowhead tip — unambiguously points downstream
+  ctx.lineTo(hb[0]-hnx*flareW, hb[1]-hny*flareW);
   for(let i=right.length-1;i>=0;i--) ctx.lineTo(right[i][0],right[i][1]);
   ctx.closePath(); ctx.fill();
 }
 
 // draws the current flow field. `fromCache`=true (used while a zoom gesture
-// is still in flight) re-projects whatever vectors are already cached at the
-// current pan/zoom instead of recomputing them, so panning/zooming stays
-// smooth; the real recompute at the new resolution happens once it settles.
+// is still in flight) re-projects the already-cached streamlines — traced in
+// DATA space — through the current pan/zoom instead of retracing them, so
+// the gesture itself stays smooth; the real recompute (which re-runs the ODE
+// integrator and re-traces every streamline) happens once it settles.
 function drawFlowField(fromCache){
   clearFlowCanvas();
   if(!S.flowOn || !_tu) return;
   const bounds = fromCache && _flowCache.vectors ? null : visibleDataBounds();
-  const vectors = fromCache && _flowCache.vectors ? _flowCache.vectors : computeFlowField(bounds);
-  const cv=$('flowCanvas'); if(!vectors||!cv||!vectors.length) return;
-  const dirs=smoothFlowDirections(vectors);
-  const ctx=cv.getContext('2d');
+  const cache = fromCache && _flowCache.vectors ? _flowCache : computeFlowField(bounds);
+  if(!cache || !cache.streamlines || !cache.streamlines.length) return;
+  const ctx=$('flowCanvas').getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   ctx.fillStyle=cvar('--flow');
-  // raw (unnormalised) screen-space drift lengths, for a mild magnitude cue via opacity
-  const raw=vectors.map(([x0,y0,x1,y1])=>{
-    const a=_tu.map(x0,y0), b=_tu.map(x1,y1); return Math.hypot(b[0]-a[0],b[1]-a[1]);
-  });
-  const maxRaw=Math.max(1e-6, ...raw);
-  vectors.forEach(([x0,y0],i)=>{
-    const p0=_tu.map(x0,y0);
-    const [ux,uy]=dirs[i];
-    const p1=[p0[0]+ux*FLOW_ARROW_PX, p0[1]+uy*FLOW_ARROW_PX];
-    // bow direction/magnitude comes from how much smoothing bent this line
-    // away from its own raw drift — a small, organic curve, not noise
-    const rawDx=vectors[i][2]-x0, rawDy=vectors[i][3]-y0, rawLen=Math.hypot(rawDx,rawDy)||1e-9;
-    const cross=(rawDx/rawLen)*uy-(rawDy/rawLen)*ux;
-    ctx.globalAlpha=clamp(0.3+0.65*(raw[i]/maxRaw), 0.3, 0.9);
-    drawTaperedFlowLine(ctx, p0, p1, FLOW_MAX_WIDTH, clamp(cross*0.35,-0.22,0.22));
+  const maxMag=Math.max(1e-6, ...cache.rawMag);
+  cache.streamlines.forEach(line=>{
+    const screenPts=line.pts.map(([x,y])=>_tu.map(x,y));
+    if(screenPts.length<2) return;
+    const isBranch = line.seed % 1 !== 0;
+    const mag = cache.rawMag[Math.min(Math.floor(line.seed), cache.rawMag.length-1)]/maxMag;
+    ctx.globalAlpha=clamp((isBranch?0.22:0.3)+0.55*mag, 0.22, 0.9);
+    drawTaperedStreamline(ctx, screenPts, FLOW_MAX_WIDTH*(isBranch?0.72:1));
   });
   ctx.globalAlpha=1;
 }
