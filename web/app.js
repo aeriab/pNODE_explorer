@@ -682,7 +682,15 @@ function setupTaxumapZoom(){
     _tuSettleT=setTimeout(()=>{
       if(!isExpanded('tuPanel')) return;
       drawTaxumapBackdrop(false);   // one crisp redraw + a fresh cache snapshot
-      drawFlowField(false);          // one real field recompute at the new resolution
+      // the field itself (ODE integrator + streamline retrace) only actually
+      // recomputes once zoom has moved by FLOW_RECOMPUTE_ZOOM_FACTOR since the
+      // last real recompute — small back-and-forth zooming just re-projects
+      // the existing streamlines (still cheap: see drawFlowField) instead of
+      // re-running the model on every little settle
+      const movedEnough = _flowLastZoom==null ||
+        S.tuZoom/_flowLastZoom > FLOW_RECOMPUTE_ZOOM_FACTOR ||
+        S.tuZoom/_flowLastZoom < 1/FLOW_RECOMPUTE_ZOOM_FACTOR;
+      drawFlowField(!movedEnough);
       if(fCanvas) fCanvas.style.opacity='1';
     }, 160);
   }, {passive:false});
@@ -704,6 +712,15 @@ function setupTaxumapZoom(){
 // 10k-point redraw) once the gesture settles, so the map always ends up
 // pixel-crisp; only the handful of frames mid-gesture trade a touch of
 // raster softness for staying smooth — the same tradeoff map apps make.
+// Both the backdrop dots and the flow-field streamlines are drawn thinner
+// when zoomed all the way out (where ~10k overlapping points/many strands
+// would otherwise read as one dense blob) and grow to their normal, already-
+// tuned size by TU_LOD_ZOOM — matching how the map already looks once you've
+// zoomed in a bit. tuLod() is 0 at zoom=1 and 1 at zoom>=TU_LOD_ZOOM.
+const TU_LOD_ZOOM = 5;
+const tuLod = ()=> clamp((S.tuZoom-1)/(TU_LOD_ZOOM-1), 0, 1);
+const lerp = (a,b,t)=> a+(b-a)*t;
+
 let _tuBackdropSnap=null;   // {canvas, zoom, pan}
 function drawTaxumapBackdrop(fromCache){
   const ctx=$('taxumapCanvas').getContext('2d');
@@ -718,6 +735,7 @@ function drawTaxumapBackdrop(fromCache){
   }
   const info=TAXUMAP.info();
   const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
+  const dotR=lerp(0.9, 2.0, tuLod());
   // group by fill color so the whole cloud is a handful of fill() calls
   // instead of one beginPath/arc/fill per point
   const byColor=new Map();
@@ -732,7 +750,7 @@ function drawTaxumapBackdrop(fromCache){
       ctx2.fillStyle=col; ctx2.beginPath();
       for(const i of idxs){
         const p=_tu.map(bd[2*i],bd[2*i+1]);
-        ctx2.moveTo(p[0]+2.0,p[1]); ctx2.arc(p[0],p[1],2.0,0,6.2832);
+        ctx2.moveTo(p[0]+dotR,p[1]); ctx2.arc(p[0],p[1],dotR,0,6.2832);
       }
       ctx2.fill();
     }
@@ -866,7 +884,9 @@ const FLOW_GRID = 22;         // spatial bins per axis, across whatever is curre
                                // count packs into a smaller area: finer real detail, same on-
                                // screen density, exactly like map-tile LOD.
 const FLOW_MIN_DRIFT = 1e-3;  // skip samples the model predicts won't move (data-space units)
-const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each streamline
+const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each streamline (at full zoom — see TU_LOD_ZOOM)
+const FLOW_RECOMPUTE_ZOOM_FACTOR = 1.5; // zoom must change by this ratio since the last real recompute
+                                          // before the field (ODE integrator + retrace) runs again
 const STREAM_SEEDS = 70;          // long curved streamlines drawn (subsampled from the sample vectors)
 const STREAM_STEPS = 16;          // forward integration steps per streamline (data-space, field-guided)
 const STREAM_BRANCH_AT = 7;       // step index where ~1/3 of streamlines fork off a second thread
@@ -891,6 +911,7 @@ function pickFlowSamplePoints(info, bounds){
 }
 
 let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null};
+let _flowLastZoom=null;   // S.tuZoom the last time the field was actually recomputed — see FLOW_RECOMPUTE_ZOOM_FACTOR
 function activePerturbationSchedule(){
   const sched={};
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
@@ -925,6 +946,7 @@ function computeFlowField(bounds){
   const rawMag = vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
   const streamlines = buildStreamlines(vectors, dirs, bounds);
   _flowCache={key, vectors, dirs, streamlines, rawMag};
+  _flowLastZoom=S.tuZoom;
   return _flowCache;
 }
 
@@ -1094,13 +1116,17 @@ function drawFlowField(fromCache){
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   ctx.fillStyle=cvar('--flow');
   const maxMag=Math.max(1e-6, ...cache.rawMag);
+  // thinner when zoomed all the way out (see TU_LOD_ZOOM) — recomputed every
+  // call, including mid-gesture reprojection, so width tracks zoom smoothly
+  // even though the underlying streamlines themselves only retrace on settle
+  const baseW=lerp(FLOW_MAX_WIDTH*0.36, FLOW_MAX_WIDTH, tuLod());
   cache.streamlines.forEach(line=>{
     const screenPts=line.pts.map(([x,y])=>_tu.map(x,y));
     if(screenPts.length<2) return;
     const isBranch = line.seed % 1 !== 0;
     const mag = cache.rawMag[Math.min(Math.floor(line.seed), cache.rawMag.length-1)]/maxMag;
     ctx.globalAlpha=clamp((isBranch?0.22:0.3)+0.55*mag, 0.22, 0.9);
-    drawTaperedStreamline(ctx, screenPts, FLOW_MAX_WIDTH*(isBranch?0.72:1));
+    drawTaperedStreamline(ctx, screenPts, baseW*(isBranch?0.72:1));
   });
   ctx.globalAlpha=1;
 }
