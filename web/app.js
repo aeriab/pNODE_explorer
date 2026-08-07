@@ -614,7 +614,7 @@ function renderTaxumap(){
   // when there's nothing on screen yet, so it doesn't read as broken
   $('tuHint').textContent = (S.flowOn && _flowPending && !_flowCache.vectors)
     ? 'computing flow field…'
-    : 'drag the ● to move along the predicted path · scroll to zoom';
+    : 'drag the ● to move along the predicted path · scroll to zoom · two fingers to pan';
 }
 
 // _tuBase holds the fixed "fit the whole reference cloud" transform (zoom=1,
@@ -653,15 +653,52 @@ function tuInvert(sx,sy){
 function visibleDataBounds(){
   const b=_tuBase; if(!b) return null;
   const a=tuInvert(0,0), c=tuInvert(b.w,b.h);
-  return [ Math.max(b.xmin,Math.min(a[0],c[0])), Math.min(b.xmax,Math.max(a[0],c[0])),
-           Math.max(b.ymin,Math.min(a[1],c[1])), Math.min(b.ymax,Math.max(a[1],c[1])) ];
+  // clamp each edge independently into [xmin,xmax]/[ymin,ymax] (not just one
+  // side against the other's raw value) — now that panning can push the
+  // WHOLE viewport past the data on one side (see clampTuPan's allowed
+  // margin), clamping only the lower edge up and the upper edge down could
+  // leave the upper edge still below the (now-clamped) lower edge, i.e. an
+  // inverted [min>max] result that broke pickFlowSamplePoints/buildStreamlines
+  const xmin=clamp(Math.min(a[0],c[0]), b.xmin, b.xmax), xmax=clamp(Math.max(a[0],c[0]), b.xmin, b.xmax);
+  const ymin=clamp(Math.min(a[1],c[1]), b.ymin, b.ymax), ymax=clamp(Math.max(a[1],c[1]), b.ymin, b.ymax);
+  return [Math.min(xmin,xmax), Math.max(xmin,xmax), Math.min(ymin,ymax), Math.max(ymin,ymax)];
 }
 
-// mouse-wheel zoom, centred on the cursor (same feel as a map app): redraw
-// the backdrop/path/dot immediately (cheap) on every tick, but only
-// recompute the flow field's sample points/vectors (the expensive part)
-// once scrolling settles, at whatever resolution the new zoom level implies.
+// keep the pan within reach of the actual data: a positive pan.x always
+// reveals empty margin beyond the cloud's top-left corner (base-space has
+// nothing before 0), capped to a fixed ~1/4 of the viewport regardless of
+// zoom, while the far side is capped so at least ~75% of the viewport still
+// overlaps real content — that bound DOES grow with zoom (the more you've
+// zoomed in, the more of the cloud there is to pan across before running out)
+function clampTuPan(){
+  if(!_tu) return;
+  const w=_tu.w, h=_tu.h, Z=S.tuZoom, minOverlap=0.75;
+  S.tuPan.x = clamp(S.tuPan.x, minOverlap*w - Z*w, w*(1-minOverlap));
+  S.tuPan.y = clamp(S.tuPan.y, minOverlap*h - Z*h, h*(1-minOverlap));
+}
+
+// shared by both zoom and pan gestures: redraw immediately (cheap — re-
+// transforms the cached backdrop bitmap and re-projects the cached
+// streamlines, touching neither the 10k-point cloud nor the ODE integrator)
+// and only do the expensive part (a crisp backdrop redraw, and a flow-field
+// recompute if the view has moved far enough — see flowFieldStale) once the
+// gesture settles.
 let _tuZoomRAF=null, _tuSettleT=null;
+function scheduleTuGestureRedraw(fCanvas){
+  if(_tuZoomRAF) cancelAnimationFrame(_tuZoomRAF);
+  _tuZoomRAF=requestAnimationFrame(()=>{
+    drawTaxumapBackdrop(true); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(true);
+  });
+  if(fCanvas && fCanvas.style.opacity!=='0.5') fCanvas.style.opacity='0.5';
+  clearTimeout(_tuSettleT);
+  _tuSettleT=setTimeout(()=>{
+    if(!isExpanded('tuPanel')) return;
+    drawTaxumapBackdrop(false);   // one crisp redraw + a fresh cache snapshot
+    drawFlowField(!flowFieldStale(visibleDataBounds()));
+    if(fCanvas) fCanvas.style.opacity='1';
+  }, 160);
+}
+
 function setupTaxumapZoom(){
   const wrap=$('taxumapWrap');
   const fCanvas=$('flowCanvas');
@@ -670,10 +707,30 @@ function setupTaxumapZoom(){
   // wheel tick of a gesture when the container isn't moving. Cache it for
   // the duration of a gesture and only re-measure once scrolling has fully
   // stopped (a resize mid-gesture is not a real scenario here).
-  let rectCache=null, fCanvasDimmed=false;
+  let rectCache=null;
+  const clearRectCache=()=>{ rectCache=null; };
   wrap.addEventListener('wheel',(e)=>{
     if(!_tu||!_tuBase) return;
     e.preventDefault(); e.stopPropagation();
+    // Trackpads report two-finger gestures as wheel events too. Browsers mark
+    // an actual pinch with ctrlKey — the same convention used for
+    // ctrl+wheel-to-zoom on a mouse — regardless of whether Ctrl is actually
+    // held, so ctrlKey reliably means "zoom" either way. The remaining
+    // ambiguity is a plain vertical wheel: a two-finger swipe and a classic
+    // mouse wheel are otherwise indistinguishable through this event (both
+    // can report deltaMode 0 depending on OS/browser — a notched "line"
+    // deltaMode can't be relied on). A non-zero deltaX is the one signal a
+    // mouse wheel essentially never produces but a real two-finger swipe
+    // almost always does (natural hand motion is rarely perfectly vertical),
+    // so that's the switch: any horizontal component means pan, everything
+    // else keeps the original scroll-to-zoom behaviour.
+    if(!e.ctrlKey && e.deltaX!==0){
+      S.tuPan.x -= e.deltaX;
+      S.tuPan.y -= e.deltaY;
+      clampTuPan();
+      scheduleTuGestureRedraw(fCanvas);
+      return;
+    }
     if(!rectCache) rectCache=wrap.getBoundingClientRect();
     const mx=e.clientX-rectCache.left, my=e.clientY-rectCache.top;
     const oldZoom=S.tuZoom;
@@ -684,36 +741,14 @@ function setupTaxumapZoom(){
     S.tuPan.x = mx - (mx-S.tuPan.x)/oldZoom*newZoom;
     S.tuPan.y = my - (my-S.tuPan.y)/oldZoom*newZoom;
     S.tuZoom = newZoom;
-    if(_tuZoomRAF) cancelAnimationFrame(_tuZoomRAF);
-    // in-flight: re-transform the cached backdrop bitmap and re-project the
-    // cached streamlines instead of touching the 10k-point cloud or the ODE
-    // integrator — that's what keeps the gesture itself smooth. The real,
-    // crisp recompute of both happens once the gesture settles, below.
-    _tuZoomRAF=requestAnimationFrame(()=>{
-      drawTaxumapBackdrop(true); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(true);
-    });
-    if(fCanvas && !fCanvasDimmed){ fCanvas.style.opacity='0.5'; fCanvasDimmed=true; }
-    clearTimeout(_tuSettleT);
-    _tuSettleT=setTimeout(()=>{
-      if(!isExpanded('tuPanel')) return;
-      drawTaxumapBackdrop(false);   // one crisp redraw + a fresh cache snapshot
-      // the field itself (ODE integrator + streamline retrace) only actually
-      // recomputes once zoom has moved by FLOW_RECOMPUTE_ZOOM_FACTOR since the
-      // last real recompute — small back-and-forth zooming just re-projects
-      // the existing streamlines (still cheap: see drawFlowField) instead of
-      // re-running the model on every little settle
-      const movedEnough = _flowLastZoom==null ||
-        S.tuZoom/_flowLastZoom > FLOW_RECOMPUTE_ZOOM_FACTOR ||
-        S.tuZoom/_flowLastZoom < 1/FLOW_RECOMPUTE_ZOOM_FACTOR;
-      drawFlowField(!movedEnough);
-      if(fCanvas){ fCanvas.style.opacity='1'; fCanvasDimmed=false; }
-      rectCache=null;   // re-measure lazily next gesture, in case of a resize meanwhile
-    }, 160);
+    clampTuPan();
+    scheduleTuGestureRedraw(fCanvas);
   }, {passive:false});
   wrap.addEventListener('dblclick', ()=>{
     S.tuZoom=1; S.tuPan={x:0,y:0};
     if(isExpanded('tuPanel')){ drawTaxumapBackdrop(false); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(false); }
   });
+  window.addEventListener('resize', clearRectCache);
 }
 
 // The reference cloud is ~10k points; redrawing all of them every animation
@@ -737,6 +772,51 @@ const TU_LOD_ZOOM = 5;
 const tuLod = ()=> clamp((S.tuZoom-1)/(TU_LOD_ZOOM-1), 0, 1);
 const lerp = (a,b,t)=> a+(b-a)*t;
 
+// Spatial bucketing for the backdrop's zoomed-out LOD: a plain index stride
+// (every Nth point) thinned dense clusters fine, but the reference cloud's
+// index order isn't spatially random — a handful of genuinely isolated
+// points (outlier samples with nothing nearby) would land at unlucky stride
+// offsets and just vanish, leaving a visible "bald spot" even though zooming
+// into that exact spot shows a real dot there. Bucketing by position first
+// and keeping every point in any sparsely-populated cell (regardless of
+// stride) fixes that: isolated points are never thinned, only points that
+// have plenty of near-neighbours already on screen are. Built once and
+// cached — the reference cloud's positions never change.
+const TU_BACKDROP_GRID = 56;
+let _tuBackdropGrid=null;   // Map<cellKey, index[]>
+function buildBackdropGrid(){
+  if(_tuBackdropGrid) return _tuBackdropGrid;
+  const info=TAXUMAP.info();
+  const bd=info.bdCoords, cls=info.bdClass;
+  const [xmin,xmax,ymin,ymax]=info.bounds;
+  const cellW=(xmax-xmin)/TU_BACKDROP_GRID||1, cellH=(ymax-ymin)/TU_BACKDROP_GRID||1;
+  const cells=new Map();
+  for(let i=0;i<cls.length;i++){
+    const cx=Math.min(TU_BACKDROP_GRID-1,Math.max(0,Math.floor((bd[2*i]-xmin)/cellW)));
+    const cy=Math.min(TU_BACKDROP_GRID-1,Math.max(0,Math.floor((bd[2*i+1]-ymin)/cellH)));
+    const key=cx*TU_BACKDROP_GRID+cy;
+    if(!cells.has(key)) cells.set(key,[]);
+    cells.get(key).push(i);
+  }
+  _tuBackdropGrid=cells;
+  return cells;
+}
+// at lodT=0 (zoomed all the way out) keeps ~1/6 of each dense cell, always
+// including every point of a cell with <=3 (the isolated/outlier points);
+// ramps up to showing everything by TU_LOD_ZOOM, same as the dot radius
+function pickBackdropIndices(lodT){
+  const cells=buildBackdropGrid();
+  const keepFrac=lerp(1/6, 1, lodT);
+  const idxs=[];
+  for(const arr of cells.values()){
+    if(arr.length<=3 || keepFrac>=1){ for(const i of arr) idxs.push(i); continue; }
+    const keep=Math.max(2, Math.round(arr.length*keepFrac));
+    const cellStride=arr.length/keep;
+    for(let k=0;k<keep;k++) idxs.push(arr[Math.min(arr.length-1, Math.round(k*cellStride))]);
+  }
+  return idxs;
+}
+
 let _tuBackdropSnap=null;   // {canvas, zoom, pan}
 function drawTaxumapBackdrop(fromCache){
   const ctx=$('taxumapCanvas').getContext('2d');
@@ -751,17 +831,11 @@ function drawTaxumapBackdrop(fromCache){
   }
   const info=TAXUMAP.info();
   const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
-  const dotR=lerp(0.9, 2.0, tuLod());
-  // zoomed all the way out, the ~10k-point cloud is squeezed into one small
-  // viewport and reads as a dense blob anyway — skip most of it (a stable
-  // index stride, not random, so the same points draw every redraw and
-  // nothing flickers) and show the full cloud once zoomed in enough that
-  // individual points are actually distinguishable
-  const stride=Math.round(lerp(4, 1, tuLod()));
+  const dotR=lerp(1.15, 2.0, tuLod());   // a touch bigger when zoomed out, to help fill in a thinner cloud
   // group by fill color so the whole cloud is a handful of fill() calls
   // instead of one beginPath/arc/fill per point
   const byColor=new Map();
-  for(let i=0;i<cls.length;i+=stride){
+  for(const i of pickBackdropIndices(tuLod())){
     const col=colors[cls[i]]||'#888';
     if(!byColor.has(col)) byColor.set(col,[]);
     byColor.get(col).push(i);
@@ -949,7 +1023,24 @@ function pickFlowSamplePoints(info, bounds){
 }
 
 let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null};
-let _flowLastZoom=null;   // S.tuZoom the last time the field was actually recomputed — see FLOW_RECOMPUTE_ZOOM_FACTOR
+let _flowLastBounds=null;   // visibleDataBounds() the last time the field was actually recomputed
+// true once the view (from panning OR zooming) has moved far enough from
+// where the field was last computed that it's worth paying for a recompute —
+// either the view shifted by a good fraction of what was visible, or the
+// zoom level (extent size) changed by FLOW_RECOMPUTE_ZOOM_FACTOR. Panning
+// alone can't trigger this by tracking zoom only (a pure pan never changes
+// S.tuZoom), so both position and scale are checked against the bounds
+// actually used last time, not just the zoom number.
+function flowFieldStale(bounds){
+  const o=_flowLastBounds; if(!o) return true;
+  const [oxmin,oxmax,oymin,oymax]=o, [nxmin,nxmax,nymin,nymax]=bounds;
+  const ow=oxmax-oxmin, oh=oymax-oymin; if(ow<=0||oh<=0) return true;
+  const nw=nxmax-nxmin, nh=nymax-nymin;
+  const scaleChange=Math.max(nw/ow, ow/nw, nh/oh, oh/nh);
+  if(scaleChange>FLOW_RECOMPUTE_ZOOM_FACTOR) return true;
+  const dxFrac=Math.abs(nxmin-oxmin)/ow, dyFrac=Math.abs(nymin-oymin)/oh;
+  return dxFrac>0.4 || dyFrac>0.4;
+}
 function activePerturbationSchedule(){
   const sched={};
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
@@ -1013,11 +1104,11 @@ function flowChunkStep(){
   const rawMag = p.vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
   const streamlines = buildStreamlines(p.vectors, dirs, p.bounds);
   _flowCache={key:p.key, vectors:p.vectors, dirs, streamlines, rawMag};
-  _flowLastZoom=S.tuZoom;
+  _flowLastBounds=p.bounds;
   _flowPending=null;
   if(S.flowOn && isExpanded('tuPanel')){
     drawFlowField(false);   // paint the finished field
-    $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom';
+    $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom · two fingers to pan';
   }
 }
 
