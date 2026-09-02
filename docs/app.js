@@ -642,28 +642,6 @@ function setupTaxumapMap(w,h){
   _tu={w,h,dpr,map,fc:null};
 }
 
-// screen (x,y) -> data-space coords, inverse of the map() above; used only to
-// work out which slice of the reference cloud is currently on screen so the
-// flow field can sample it at the right density (see visibleDataBounds)
-function tuInvert(sx,sy){
-  const b=_tuBase; if(!b) return [0,0];
-  const bx=(sx-S.tuPan.x)/S.tuZoom, by=(sy-S.tuPan.y)/S.tuZoom;
-  return [ b.xmin+(bx-b.offx)/b.s, b.ymin+((b.h-by)-b.offy)/b.s ];
-}
-function visibleDataBounds(){
-  const b=_tuBase; if(!b) return null;
-  const a=tuInvert(0,0), c=tuInvert(b.w,b.h);
-  // clamp each edge independently into [xmin,xmax]/[ymin,ymax] (not just one
-  // side against the other's raw value) — now that panning can push the
-  // WHOLE viewport past the data on one side (see clampTuPan's allowed
-  // margin), clamping only the lower edge up and the upper edge down could
-  // leave the upper edge still below the (now-clamped) lower edge, i.e. an
-  // inverted [min>max] result that broke pickFlowSamplePoints/buildStreamlines
-  const xmin=clamp(Math.min(a[0],c[0]), b.xmin, b.xmax), xmax=clamp(Math.max(a[0],c[0]), b.xmin, b.xmax);
-  const ymin=clamp(Math.min(a[1],c[1]), b.ymin, b.ymax), ymax=clamp(Math.max(a[1],c[1]), b.ymin, b.ymax);
-  return [Math.min(xmin,xmax), Math.max(xmin,xmax), Math.min(ymin,ymax), Math.max(ymin,ymax)];
-}
-
 // keep the pan within reach of the actual data: a positive pan.x always
 // reveals empty margin beyond the cloud's top-left corner (base-space has
 // nothing before 0), capped to a fixed ~1/4 of the viewport regardless of
@@ -680,9 +658,9 @@ function clampTuPan(){
 // shared by both zoom and pan gestures: redraw immediately (cheap — re-
 // transforms the cached backdrop bitmap and re-projects the cached
 // streamlines, touching neither the 10k-point cloud nor the ODE integrator)
-// and only do the expensive part (a crisp backdrop redraw, and a flow-field
-// recompute if the view has moved far enough — see flowFieldStale) once the
-// gesture settles.
+// and only do the expensive part (a crisp backdrop redraw) once the gesture
+// settles. The flow field itself never needs a recompute here — it's fixed
+// in data space and keyed on the perturbation set only (see drawFlowField).
 let _tuZoomRAF=null, _tuSettleT=null;
 function scheduleTuGestureRedraw(fCanvas){
   if(_tuZoomRAF) cancelAnimationFrame(_tuZoomRAF);
@@ -694,7 +672,10 @@ function scheduleTuGestureRedraw(fCanvas){
   _tuSettleT=setTimeout(()=>{
     if(!isExpanded('tuPanel')) return;
     drawTaxumapBackdrop(false);   // one crisp redraw + a fresh cache snapshot
-    drawFlowField(!flowFieldStale(visibleDataBounds()));
+    // the flow field lives entirely in data space now (see the flow-field
+    // section below) — zooming/panning never invalidates it, so this is
+    // always a reprojection of the cached streamlines, never a recompute
+    drawFlowField(true);
     if(fCanvas) fCanvas.style.opacity='1';
   }, 160);
 }
@@ -977,43 +958,54 @@ function drawTaxumapLegend(){
 }
 
 // --------------------------------------------------------------------- //
-//  TaxUMAP flow field — a map-wide vector field showing where community
-//  composition is predicted to DRIFT under a fixed, constant antibiotic
-//  exposure (the toggled "Perturbations"), independent of any one patient.
-//  For a spatial sample of the TaxUMAP reference profiles, each SEED point
-//  runs the SAME validated pNODE integrator (window.__tipnodeForecast)
-//  forward FLOW_DT days holding the toggled classes continuously "on" from
-//  a real reference composition, then re-projects the resulting composition
-//  back onto the map. That gives a sparse, ODE-accurate vector at each seed;
-//  everything downstream — the smoothing, the long curved streamlines, the
-//  forks — is cheap interpolation/geometry over those vectors, not more
-//  model calls, so the visual richness below costs almost nothing extra
-//  once the vectors themselves are computed.
+//  TaxUMAP flow field — a map-wide instantaneous-velocity field showing where
+//  community composition is predicted to DRIFT under a fixed, constant
+//  antibiotic exposure (the toggled "Perturbations"), independent of any one
+//  patient. Follows the streamline method of Schluter et al. 2023 (Cell Host
+//  Microbe): a large set of real, observed reference communities are used as
+//  SEEDs; each is advanced one short FLOW_DT=0.5-day step with the SAME
+//  validated pNODE integrator (window.__tipnodeForecast) holding the toggled
+//  classes continuously "on", re-projected back onto the map, and the
+//  map-space displacement divided by FLOW_DT gives an instantaneous velocity
+//  at that seed. Those sparse, ODE-accurate velocities are then interpolated
+//  onto a continuous field by distance-weighted regression (sampleFlowDirection)
+//  and traced into streamlines; regions too far from any real seed to have
+//  support are masked rather than extrapolated into (see FLOW_SUPPORT_MIN_W).
+//  The seed grid spans the FULL reference map, fixed in data space — never
+//  the current viewport — so the field is computed once per antibiotic
+//  condition and merely re-projected through the live pan/zoom transform
+//  afterwards; this is also what keeps the streamlines' directions stable
+//  while zooming/panning (they used to be resampled per-viewport, which made
+//  them visibly reshuffle direction on every zoom step).
 // --------------------------------------------------------------------- //
-const FLOW_DT = 7;            // days of constant exposure integrated per sample vector
-const FLOW_GRID = 22;         // spatial bins per axis, across whatever is currently VISIBLE —
-                               // zooming in shrinks the visible data extent, so the same grid
-                               // count packs into a smaller area: finer real detail, same on-
-                               // screen density, exactly like map-tile LOD.
-const FLOW_MIN_DRIFT = 1e-3;  // skip samples the model predicts won't move (data-space units)
+const FLOW_DT = 0.5;          // short "instantaneous" step per seed, days (Schluter et al. 2023, Fig 5 legend)
+const FLOW_GRID = 30;         // spatial bins per axis across the FIXED full reference map (see above) —
+                               // this no longer depends on zoom/pan, so the discretization — and hence
+                               // the streamlines' seed points and directions — never changes underneath you
+const FLOW_MIN_DRIFT = 1e-4;  // skip samples the model predicts won't move (data-space units over
+                               // one FLOW_DT step — scaled down from the old 7-day threshold since
+                               // a genuinely instantaneous 0.5-day step moves much less per sample)
 const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each streamline (at full zoom — see TU_LOD_ZOOM)
-const FLOW_RECOMPUTE_ZOOM_FACTOR = 1.5; // zoom must change by this ratio since the last real recompute
-                                          // before the field (ODE integrator + retrace) runs again
+const FLOW_SUPPORT_MIN_W = 0.05; // minimum inverse-distance weight from the nearest seed vectors before a
+                                  // point counts as having real sample support; below this the field is
+                                  // masked (Schluter et al. 2023: "masking grid regions with little support
+                                  // from real samples") instead of extrapolating a direction from far away
 const STREAM_SEEDS = 70;          // long curved streamlines drawn (subsampled from the sample vectors)
 const STREAM_STEPS = 16;          // forward integration steps per streamline (data-space, field-guided)
 const STREAM_BRANCH_AT = 7;       // step index where ~1/3 of streamlines fork off a second thread
 const STREAM_BRANCH_LEN = 7;      // steps traced along a fork
 const STREAM_BRANCH_ANGLE = 0.36; // radians (~21°) a fork rotates away from the main flow
 
-// spatial subsample of TaxUMAP reference indices, one per grid cell, restricted
-// to `bounds` (the currently visible data-space region — see visibleDataBounds)
-function pickFlowSamplePoints(info, bounds){
-  const [xmin,xmax,ymin,ymax]=bounds;
+// spatial subsample of TaxUMAP reference indices, one real observed sample
+// per grid cell, spanning the FIXED full reference map (info.bounds) — not
+// whatever's currently visible, so this set of seeds (and therefore the
+// field computed from them) never changes just because the user zoomed/panned
+function pickFlowSamplePoints(info){
+  const [xmin,xmax,ymin,ymax]=info.bounds;
   const cellW=(xmax-xmin)/FLOW_GRID||1, cellH=(ymax-ymin)/FLOW_GRID||1;
   const chosen=new Map();
   for(let r=0;r<info.nRef;r++){
     const x=info.knnCoords[2*r], y=info.knnCoords[2*r+1];
-    if(x<xmin||x>xmax||y<ymin||y>ymax) continue;
     const cx=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((x-xmin)/cellW)));
     const cy=Math.min(FLOW_GRID-1,Math.max(0,Math.floor((y-ymin)/cellH)));
     const key=cx*FLOW_GRID+cy;
@@ -1023,24 +1015,6 @@ function pickFlowSamplePoints(info, bounds){
 }
 
 let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null};
-let _flowLastBounds=null;   // visibleDataBounds() the last time the field was actually recomputed
-// true once the view (from panning OR zooming) has moved far enough from
-// where the field was last computed that it's worth paying for a recompute —
-// either the view shifted by a good fraction of what was visible, or the
-// zoom level (extent size) changed by FLOW_RECOMPUTE_ZOOM_FACTOR. Panning
-// alone can't trigger this by tracking zoom only (a pure pan never changes
-// S.tuZoom), so both position and scale are checked against the bounds
-// actually used last time, not just the zoom number.
-function flowFieldStale(bounds){
-  const o=_flowLastBounds; if(!o) return true;
-  const [oxmin,oxmax,oymin,oymax]=o, [nxmin,nxmax,nymin,nymax]=bounds;
-  const ow=oxmax-oxmin, oh=oymax-oymin; if(ow<=0||oh<=0) return true;
-  const nw=nxmax-nxmin, nh=nymax-nymin;
-  const scaleChange=Math.max(nw/ow, ow/nw, nh/oh, oh/nh);
-  if(scaleChange>FLOW_RECOMPUTE_ZOOM_FACTOR) return true;
-  const dxFrac=Math.abs(nxmin-oxmin)/ow, dyFrac=Math.abs(nymin-oymin)/oh;
-  return dxFrac>0.4 || dyFrac>0.4;
-}
 function activePerturbationSchedule(){
   const sched={};
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
@@ -1058,9 +1032,9 @@ function activePerturbationSchedule(){
 // stays responsive and the current frame rate doesn't drop, even though the
 // field itself takes a few more frames in wall-clock time to finish.
 const FLOW_CHUNK_BUDGET_MS = 10;
-let _flowPending=null;   // {key, idxs, i, vectors, N, schedule, info, bounds}
+let _flowPending=null;   // {key, idxs, i, vectors, N, schedule, info}
 
-function startFlowFieldRecompute(bounds, key){
+function startFlowFieldRecompute(key){
   // never abandon in-progress work for a newer key — under a fast/jittery
   // gesture the target can keep moving before one batch even finishes, and
   // restarting from scratch each time (re-running pickFlowSamplePoints,
@@ -1073,9 +1047,9 @@ function startFlowFieldRecompute(bounds, key){
   const N = S.fc && S.fc.fullComp && S.fc.fullComp[0] ? S.fc.fullComp[0].length : null;
   if(!N) return;
   const info = TAXUMAP.info();
-  const idxs = pickFlowSamplePoints(info, bounds);
+  const idxs = pickFlowSamplePoints(info);
   const schedule = activePerturbationSchedule();
-  _flowPending={key, idxs, i:0, vectors:[], N, schedule, info, bounds};
+  _flowPending={key, idxs, i:0, vectors:[], N, schedule, info};
   requestAnimationFrame(flowChunkStep);
 }
 
@@ -1093,8 +1067,12 @@ function flowChunkStep(){
     const p1=TAXUMAP.project(comp2);
     if(!p1) continue;
     const x0d=p.info.knnCoords[2*r], y0d=p.info.knnCoords[2*r+1];
-    if(Math.hypot(p1[0]-x0d,p1[1]-y0d)<FLOW_MIN_DRIFT) continue;
-    p.vectors.push([x0d,y0d,p1[0],p1[1]]);
+    const rawDx=p1[0]-x0d, rawDy=p1[1]-y0d;
+    if(Math.hypot(rawDx,rawDy)<FLOW_MIN_DRIFT) continue;
+    // Schluter et al. 2023: "map-space displacement divided by Δt as an
+    // instantaneous velocity" — direction is unaffected by the division, but
+    // it keeps the vector's magnitude a true (map-units)/day velocity
+    p.vectors.push([x0d,y0d,x0d+rawDx/FLOW_DT,y0d+rawDy/FLOW_DT]);
   }
   if(p.i<p.idxs.length){
     requestAnimationFrame(flowChunkStep);
@@ -1102,12 +1080,11 @@ function flowChunkStep(){
   }
   const dirs = smoothFlowDirections(p.vectors);
   const rawMag = p.vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
-  const streamlines = buildStreamlines(p.vectors, dirs, p.bounds);
+  const streamlines = buildStreamlines(p.vectors, dirs, p.info.bounds);
   _flowCache={key:p.key, vectors:p.vectors, dirs, streamlines, rawMag};
-  _flowLastBounds=p.bounds;
   _flowPending=null;
   if(S.flowOn && isExpanded('tuPanel')){
-    drawFlowField(false);   // paint the finished field
+    drawFlowField(true);   // paint the finished field — data-space cache, just reproject it
     $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom · two fingers to pan';
   }
 }
@@ -1136,13 +1113,20 @@ function smoothFlowDirections(vectors){
 // arbitrary data-space point — turns the handful of discrete sample vectors
 // into a continuous field a streamline can be traced through.
 function sampleFlowDirection(vectors, dirs, sigma2, x, y){
-  let wx=0, wy=0, wsum=0;
+  let wx=0, wy=0, wsum=0, wmax=0;
   for(let j=0;j<vectors.length;j++){
     const dx=x-vectors[j][0], dy=y-vectors[j][1];
     const w=1/(1+(dx*dx+dy*dy)/sigma2);
+    if(w>wmax) wmax=w;
     wx+=w*dirs[j][0]; wy+=w*dirs[j][1]; wsum+=w;
   }
-  if(wsum<1e-9) return null;
+  // Schluter et al. 2023: mask grid regions with little support from real
+  // samples rather than extrapolate a direction from far-away vectors — if
+  // even the single nearest seed is many kernel-widths away, treat this
+  // point as unsupported. buildStreamlines() stops tracing when this
+  // returns null, so a streamline simply ends instead of drifting through
+  // empty space.
+  if(wsum<1e-9 || wmax<FLOW_SUPPORT_MIN_W) return null;
   const l=Math.hypot(wx,wy)||1e-9;
   return [wx/l, wy/l];
 }
@@ -1283,23 +1267,23 @@ function renderFlowFieldStreamlines(cache){
   ctx.globalAlpha=1;
 }
 
-// draws the current flow field. `fromCache`=true (used while a zoom gesture
-// is still in flight) re-projects the already-cached streamlines — traced in
-// DATA space — through the current pan/zoom instead of retracing them, so
-// the gesture itself stays smooth. When a real recompute IS needed (new
-// bounds/perturbations, past the zoom-ratio threshold), it never blocks: the
-// last-known field keeps rendering while startFlowFieldRecompute() fills in
-// the new one across a few animation frames in the background (see above),
-// then flowChunkStep() calls back in here once it's done.
+// draws the current flow field. The field itself lives entirely in DATA
+// space and is keyed only on the active perturbation set — never on zoom/pan
+// — so `fromCache`=true (used while a zoom/pan gesture is in flight, and
+// after every gesture settles) just re-projects the already-cached
+// streamlines through the current pan/zoom instead of retracing them; the
+// streamlines' directions never change from this, only their screen
+// position/scale. When the perturbation set actually changes, it never
+// blocks: the last-known field keeps rendering while
+// startFlowFieldRecompute() fills in the new one across a few animation
+// frames in the background (see above), then flowChunkStep() calls back in
+// here once it's done.
 function drawFlowField(fromCache){
   clearFlowCanvas();
   if(!S.flowOn || !_tu) return;
   if(fromCache && _flowCache.vectors){ renderFlowFieldStreamlines(_flowCache); return; }
-  const bounds = visibleDataBounds();
-  const pkey = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
-  const bkey = bounds.map(v=>v.toFixed(3)).join(',');
-  const key = pkey+'|'+bkey;
-  if(_flowCache.key!==key || !_flowCache.vectors) startFlowFieldRecompute(bounds, key);
+  const key = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
+  if(_flowCache.key!==key || !_flowCache.vectors) startFlowFieldRecompute(key);
   if(_flowCache.vectors) renderFlowFieldStreamlines(_flowCache);   // last-known field, even if stale
 }
 
