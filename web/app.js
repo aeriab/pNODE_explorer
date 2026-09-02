@@ -744,59 +744,14 @@ function setupTaxumapZoom(){
 // 10k-point redraw) once the gesture settles, so the map always ends up
 // pixel-crisp; only the handful of frames mid-gesture trade a touch of
 // raster softness for staying smooth — the same tradeoff map apps make.
-// Both the backdrop dots and the flow-field streamlines are drawn thinner
-// when zoomed all the way out (where ~10k overlapping points/many strands
-// would otherwise read as one dense blob) and grow to their normal, already-
-// tuned size by TU_LOD_ZOOM — matching how the map already looks once you've
-// zoomed in a bit. tuLod() is 0 at zoom=1 and 1 at zoom>=TU_LOD_ZOOM.
+// The backdrop dots and flow-field streamlines are drawn a touch thinner
+// when zoomed all the way out (purely a stroke/dot-radius tweak, not a point
+// count — every reference point is always drawn, none are ever dropped) and
+// grow to their normal, already-tuned size by TU_LOD_ZOOM. tuLod() is 0 at
+// zoom=1 and 1 at zoom>=TU_LOD_ZOOM.
 const TU_LOD_ZOOM = 5;
 const tuLod = ()=> clamp((S.tuZoom-1)/(TU_LOD_ZOOM-1), 0, 1);
 const lerp = (a,b,t)=> a+(b-a)*t;
-
-// Spatial bucketing for the backdrop's zoomed-out LOD: a plain index stride
-// (every Nth point) thinned dense clusters fine, but the reference cloud's
-// index order isn't spatially random — a handful of genuinely isolated
-// points (outlier samples with nothing nearby) would land at unlucky stride
-// offsets and just vanish, leaving a visible "bald spot" even though zooming
-// into that exact spot shows a real dot there. Bucketing by position first
-// and keeping every point in any sparsely-populated cell (regardless of
-// stride) fixes that: isolated points are never thinned, only points that
-// have plenty of near-neighbours already on screen are. Built once and
-// cached — the reference cloud's positions never change.
-const TU_BACKDROP_GRID = 56;
-let _tuBackdropGrid=null;   // Map<cellKey, index[]>
-function buildBackdropGrid(){
-  if(_tuBackdropGrid) return _tuBackdropGrid;
-  const info=TAXUMAP.info();
-  const bd=info.bdCoords, cls=info.bdClass;
-  const [xmin,xmax,ymin,ymax]=info.bounds;
-  const cellW=(xmax-xmin)/TU_BACKDROP_GRID||1, cellH=(ymax-ymin)/TU_BACKDROP_GRID||1;
-  const cells=new Map();
-  for(let i=0;i<cls.length;i++){
-    const cx=Math.min(TU_BACKDROP_GRID-1,Math.max(0,Math.floor((bd[2*i]-xmin)/cellW)));
-    const cy=Math.min(TU_BACKDROP_GRID-1,Math.max(0,Math.floor((bd[2*i+1]-ymin)/cellH)));
-    const key=cx*TU_BACKDROP_GRID+cy;
-    if(!cells.has(key)) cells.set(key,[]);
-    cells.get(key).push(i);
-  }
-  _tuBackdropGrid=cells;
-  return cells;
-}
-// at lodT=0 (zoomed all the way out) keeps ~1/6 of each dense cell, always
-// including every point of a cell with <=3 (the isolated/outlier points);
-// ramps up to showing everything by TU_LOD_ZOOM, same as the dot radius
-function pickBackdropIndices(lodT){
-  const cells=buildBackdropGrid();
-  const keepFrac=lerp(1/6, 1, lodT);
-  const idxs=[];
-  for(const arr of cells.values()){
-    if(arr.length<=3 || keepFrac>=1){ for(const i of arr) idxs.push(i); continue; }
-    const keep=Math.max(2, Math.round(arr.length*keepFrac));
-    const cellStride=arr.length/keep;
-    for(let k=0;k<keep;k++) idxs.push(arr[Math.min(arr.length-1, Math.round(k*cellStride))]);
-  }
-  return idxs;
-}
 
 let _tuBackdropSnap=null;   // {canvas, zoom, pan}
 function drawTaxumapBackdrop(fromCache){
@@ -814,9 +769,10 @@ function drawTaxumapBackdrop(fromCache){
   const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
   const dotR=lerp(1.15, 2.0, tuLod());   // a touch bigger when zoomed out, to help fill in a thinner cloud
   // group by fill color so the whole cloud is a handful of fill() calls
-  // instead of one beginPath/arc/fill per point
+  // instead of one beginPath/arc/fill per point — every reference point is
+  // drawn regardless of zoom level; nothing is thinned out
   const byColor=new Map();
-  for(const i of pickBackdropIndices(tuLod())){
+  for(let i=0;i<cls.length;i++){
     const col=colors[cls[i]]||'#888';
     if(!byColor.has(col)) byColor.set(col,[]);
     byColor.get(col).push(i);
