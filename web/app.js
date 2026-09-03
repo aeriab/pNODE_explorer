@@ -1310,11 +1310,6 @@ function flowRampColor(t, ramp){
   return `rgb(${Math.round(r0+(r1-r0)*f)},${Math.round(g0+(g1-g0)*f)},${Math.round(b0+(b1-b0)*f)})`;
 }
 
-// small deterministic pseudo-random in [0,1) keyed on a streamline's seed —
-// used to decide which streamlines get a mid-line arrowhead so the choice is
-// stable frame to frame (a real Math.random() would flicker on every redraw
-// during a zoom/pan gesture) while still varying line to line.
-function pseudoRand(n){ const x=Math.sin(n*12.9898)*43758.5453; return x-Math.floor(x); }
 
 // fills one solid-colour ribbon segment through screen-space points
 // pts[i] = [x, y, halfWidth] (per-point half width, already computed by the
@@ -1344,9 +1339,34 @@ function fillRibbonRun(ctx, pts){
 // in the same bucket are merged into a single fillRibbonRun() call, so a
 // fairly uniform stretch of flow costs one fill — only where the local speed
 // actually crosses into a new bucket does the line get an extra seam — while
-// width still varies continuously point-by-point within a run. No arrowhead
-// at the tip any more; instead about 40% of streamlines get one small
-// arrowhead partway along their length (see the mid-line block below).
+// width still varies continuously point-by-point within a run. Direction
+// arrowheads are dropped along the line at a roughly fixed screen-space
+// spacing (see the arrowhead block below), so every visible stretch of flow —
+// each branch and each merged tributary is its own line here — carries clear
+// direction cues.
+const ARROW_SPACING = 34;   // px of screen length between successive arrowheads on a line
+const ARROW_SIZE = 1.4;     // size multiplier vs the earlier single-arrowhead look
+
+// one filled direction chevron on the local tangent at smoothed point i
+function drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch){
+  const n=pts.length; i=Math.min(n-2, Math.max(1, i));
+  const a=pts[i-1], b=pts[i+1], p=pts[i];
+  let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+  const nx=-ty, ny=tx;
+  const halfW=Math.max(wArr[i], 1.2);
+  const flareW=halfW*2.2*ARROW_SIZE, len=Math.max(9, halfW*4.6)*ARROW_SIZE;
+  const tipX=p[0]+tx*len*0.55, tipY=p[1]+ty*len*0.55;
+  const backX=p[0]-tx*len*0.45, backY=p[1]-ty*len*0.45;
+  ctx.fillStyle=flowRampColor(cArr[i], ramp);
+  ctx.globalAlpha=lerp(0.55,1,cArr[i])*(isBranch?0.82:1);
+  ctx.beginPath();
+  ctx.moveTo(backX+nx*flareW, backY+ny*flareW);
+  ctx.lineTo(tipX, tipY);
+  ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
+  ctx.closePath();
+  ctx.fill();
+}
+
 function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
@@ -1372,24 +1392,24 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
       runStart=i;   // next run starts at this shared boundary point — no gap
     }
   }
-  // occasional mid-line arrowhead: a small triangle at ~50% along the curve,
-  // oriented on the local tangent, sized/coloured from the local field there
-  if(pseudoRand(seed+0.137)<0.4){
-    const mid=Math.min(n-2, Math.max(1, Math.round(n*0.5)));
-    const a=pts[mid-1], b=pts[mid+1], p=pts[mid];
-    let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
-    const nx=-ty, ny=tx;
-    const halfW=wArr[mid], flareW=halfW*2.1, len=Math.max(7, halfW*4.2);
-    const tipX=p[0]+tx*len*0.55, tipY=p[1]+ty*len*0.55;
-    const backX=p[0]-tx*len*0.45, backY=p[1]-ty*len*0.45;
-    ctx.fillStyle=flowRampColor(cArr[mid], ramp);
-    ctx.globalAlpha=lerp(0.5,1,cArr[mid])*(isBranch?0.78:1);
-    ctx.beginPath();
-    ctx.moveTo(backX+nx*flareW, backY+ny*flareW);
-    ctx.lineTo(tipX, tipY);
-    ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
-    ctx.closePath();
-    ctx.fill();
+  // arrowheads along the line at a fixed screen-space spacing. Cumulative
+  // screen length is walked once; a chevron is dropped every ARROW_SPACING px.
+  // A branch also gets one just past its start so the fork's new direction is
+  // immediately legible — where one channel fans into several, each resulting
+  // line then carries its own arrowhead. Every line gets at least one.
+  const cum=[0];
+  for(let i=1;i<n;i++) cum[i]=cum[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  const total=cum[n-1];
+  const targets=[];
+  if(isBranch && total>2) targets.push(Math.min(total*0.22, ARROW_SPACING*0.8));
+  for(let d=ARROW_SPACING*0.7; d<total-2; d+=ARROW_SPACING) targets.push(d);
+  if(!targets.length && total>1) targets.push(total*0.5);
+  let lastD=-1e9;
+  for(const d of targets){
+    if(d-lastD < ARROW_SPACING*0.55) continue;
+    let i=1; while(i<n-1 && cum[i]<d) i++;
+    drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch);
+    lastD=d;
   }
 }
 
