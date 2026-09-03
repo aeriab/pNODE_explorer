@@ -924,9 +924,16 @@ function drawTaxumapLegend(){
 //  classes continuously "on", re-projected back onto the map, and the
 //  map-space displacement divided by FLOW_DT gives an instantaneous velocity
 //  at that seed. Those sparse, ODE-accurate velocities are then interpolated
-//  onto a continuous field by distance-weighted regression (sampleFlowDirection)
+//  onto a continuous field by distance-weighted regression (sampleFlowField)
 //  and traced into streamlines; regions too far from any real seed to have
 //  support are masked rather than extrapolated into (see FLOW_SUPPORT_MIN_W).
+//  Each traced point also carries the field's LOCAL interpolated speed there
+//  (not just one magnitude for the whole line), so a streamline reads as a
+//  little inferno-style heat ramp along its own length — thin and near-black
+//  where the local flow is weak, through dark purple and a magenta/orange
+//  transition, up to a thick, bright yellow where it's strongest — rather
+//  than one flat colour/width for the entire streamline (see FLOW_RAMP,
+//  drawFlowStreamline).
 //  The seed grid spans the FULL reference map, fixed in data space — never
 //  the current viewport — so the field is computed once per antibiotic
 //  condition and merely re-projected through the live pan/zoom transform
@@ -941,7 +948,14 @@ const FLOW_GRID = 30;         // spatial bins per axis across the FIXED full ref
 const FLOW_MIN_DRIFT = 1e-4;  // skip samples the model predicts won't move (data-space units over
                                // one FLOW_DT step — scaled down from the old 7-day threshold since
                                // a genuinely instantaneous 0.5-day step moves much less per sample)
-const FLOW_MAX_WIDTH = 4.4;   // stroke width at the base of each streamline (at full zoom — see TU_LOD_ZOOM)
+const FLOW_MAX_WIDTH = 4.4;   // width at the STRONGEST local flow in view (at full zoom — see TU_LOD_ZOOM)
+const FLOW_MIN_WIDTH_FRAC = 0.16; // width at the WEAKEST local flow, as a fraction of FLOW_MAX_WIDTH —
+                                   // thin where flow is negligible, thickening continuously up to
+                                   // FLOW_MAX_WIDTH where it's strongest (see drawFlowStreamline)
+const FLOW_COLOR_LEVELS = 14; // number of discrete colour buckets along FLOW_RAMP — kept as a handful
+                               // of solid-fill runs per streamline (not a per-pixel gradient) so this
+                               // stays cheap to draw every frame; 14 is fine-grained enough to read as
+                               // a smooth gradient even though it's technically discrete
 const FLOW_SUPPORT_MIN_W = 0.05; // minimum inverse-distance weight from the nearest seed vectors before a
                                   // point counts as having real sample support; below this the field is
                                   // masked (Schluter et al. 2023: "masking grid regions with little support
@@ -970,7 +984,7 @@ function pickFlowSamplePoints(info){
   return [...chosen.values()];
 }
 
-let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null};
+let _flowCache={key:null, vectors:null, dirs:null, streamlines:null, rawMag:null, magRef:null};
 function activePerturbationSchedule(){
   const sched={};
   Object.keys(S.perturbations).forEach(cat=>{ if(S.perturbations[cat]) sched[cat]=[[0,FLOW_DT]]; });
@@ -1036,8 +1050,16 @@ function flowChunkStep(){
   }
   const dirs = smoothFlowDirections(p.vectors);
   const rawMag = p.vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
-  const streamlines = buildStreamlines(p.vectors, dirs, p.info.bounds);
-  _flowCache={key:p.key, vectors:p.vectors, dirs, streamlines, rawMag};
+  const streamlines = buildStreamlines(p.vectors, dirs, rawMag, p.info.bounds);
+  // colour/width reference "strongest flow" level: the seed magnitudes are
+  // heavily right-skewed (a handful of outlier seeds can sit far above the
+  // typical value), so normalising against the true max compresses nearly
+  // the entire field into the bottom of the ramp. A high percentile instead
+  // means the bulk of ordinary flow spans the full black->purple->orange
+  // ramp, and only the genuinely strongest ~15% of it saturates to yellow.
+  const sortedMag=rawMag.slice().sort((a,b)=>a-b);
+  const magRef=sortedMag.length ? Math.max(1e-6, sortedMag[clamp(Math.floor(sortedMag.length*0.85),0,sortedMag.length-1)]) : 1e-6;
+  _flowCache={key:p.key, vectors:p.vectors, dirs, streamlines, rawMag, magRef};
   _flowPending=null;
   if(S.flowOn && isExpanded('tuPanel')){
     drawFlowField(true);   // paint the finished field — data-space cache, just reproject it
@@ -1065,16 +1087,20 @@ function smoothFlowDirections(vectors){
   });
 }
 
-// inverse-distance-weighted direction of the (already-smoothed) field at an
-// arbitrary data-space point — turns the handful of discrete sample vectors
-// into a continuous field a streamline can be traced through.
-function sampleFlowDirection(vectors, dirs, sigma2, x, y){
-  let wx=0, wy=0, wsum=0, wmax=0;
+// inverse-distance-weighted direction AND local speed of the (already-
+// direction-smoothed) field at an arbitrary data-space point — turns the
+// handful of discrete sample vectors into a continuous field a streamline
+// can be traced through, annotated with how strong the flow is right there
+// (used to colour/width each streamline point-by-point — see
+// drawFlowStreamline — rather than with one value for the whole line).
+function sampleFlowField(vectors, dirs, mags, sigma2, x, y){
+  let wx=0, wy=0, wsum=0, wmax=0, wmag=0;
   for(let j=0;j<vectors.length;j++){
     const dx=x-vectors[j][0], dy=y-vectors[j][1];
     const w=1/(1+(dx*dx+dy*dy)/sigma2);
     if(w>wmax) wmax=w;
     wx+=w*dirs[j][0]; wy+=w*dirs[j][1]; wsum+=w;
+    wmag+=w*mags[j];
   }
   // Schluter et al. 2023: mask grid regions with little support from real
   // samples rather than extrapolate a direction from far-away vectors — if
@@ -1084,15 +1110,18 @@ function sampleFlowDirection(vectors, dirs, sigma2, x, y){
   // empty space.
   if(wsum<1e-9 || wmax<FLOW_SUPPORT_MIN_W) return null;
   const l=Math.hypot(wx,wy)||1e-9;
-  return [wx/l, wy/l];
+  return { dir:[wx/l, wy/l], mag: wmag/wsum };
 }
 
 // traces STREAM_SEEDS long curved paths through the interpolated field, in
 // DATA space so the traced points stay correct however the view is zoomed/
 // panned afterwards (drawFlowField just re-maps them each frame — see
-// below); a subset fork partway through for the "splits off" look. This
-// only touches the already-computed sample vectors — no extra model calls.
-function buildStreamlines(vectors, dirs, bounds){
+// below); a subset fork partway through for the "splits off" look. Each
+// point is [x, y, localMag] — the field's interpolated speed AT that point,
+// carried along so the renderer can vary colour/width along the streamline
+// instead of using one value for the whole line. This only touches the
+// already-computed sample vectors — no extra model calls.
+function buildStreamlines(vectors, dirs, mags, bounds){
   if(!vectors.length) return [];
   const [xmin,xmax,ymin,ymax]=bounds;
   const L=Math.max(xmax-xmin, ymax-ymin)||1;
@@ -1101,13 +1130,13 @@ function buildStreamlines(vectors, dirs, bounds){
   const lines=[];
   for(let i=0;i<vectors.length;i+=stride){
     let x=vectors[i][0], y=vectors[i][1];
-    const main=[[x,y]];
-    let branchAt=null, branchDir=null;
+    const main=[[x,y,mags[i]]];
+    let branchAt=null, branchDir=null, branchMag=mags[i];
     for(let s=0;s<STREAM_STEPS;s++){
-      const d=sampleFlowDirection(vectors,dirs,sigma2,x,y); if(!d) break;
-      x+=d[0]*stepData; y+=d[1]*stepData;
-      main.push([x,y]);
-      if(s===STREAM_BRANCH_AT && (i/stride)%3===0){ branchAt=[x,y]; branchDir=d; }
+      const f=sampleFlowField(vectors,dirs,mags,sigma2,x,y); if(!f) break;
+      x+=f.dir[0]*stepData; y+=f.dir[1]*stepData;
+      main.push([x,y,f.mag]);
+      if(s===STREAM_BRANCH_AT && (i/stride)%3===0){ branchAt=[x,y]; branchDir=f.dir; branchMag=f.mag; }
     }
     lines.push({pts:main, seed:i});
     if(branchAt){
@@ -1115,14 +1144,14 @@ function buildStreamlines(vectors, dirs, bounds){
       const c=Math.cos(STREAM_BRANCH_ANGLE*sign), s2=Math.sin(STREAM_BRANCH_ANGLE*sign);
       let bx=branchAt[0], by=branchAt[1];
       let bdx=branchDir[0]*c-branchDir[1]*s2, bdy=branchDir[0]*s2+branchDir[1]*c;
-      const branch=[[bx,by]];
+      const branch=[[bx,by,branchMag]];
       for(let s=0;s<STREAM_BRANCH_LEN;s++){
-        const d=sampleFlowDirection(vectors,dirs,sigma2,bx,by); if(!d) break;
+        const f=sampleFlowField(vectors,dirs,mags,sigma2,bx,by); if(!f) break;
         // blend the local field back in so the fork bends with real drift
         // instead of shooting off in a straight line
-        let dx=d[0]+bdx*0.6, dy=d[1]+bdy*0.6, dl=Math.hypot(dx,dy)||1e-9; dx/=dl; dy/=dl;
+        let dx=f.dir[0]+bdx*0.6, dy=f.dir[1]+bdy*0.6, dl=Math.hypot(dx,dy)||1e-9; dx/=dl; dy/=dl;
         bx+=dx*stepData; by+=dy*stepData;
-        branch.push([bx,by]); bdx=dx; bdy=dy;
+        branch.push([bx,by,f.mag]); bdx=dx; bdy=dy;
       }
       lines.push({pts:branch, seed:i+0.5});
     }
@@ -1138,13 +1167,17 @@ function clearFlowCanvas(){
 
 // Catmull-Rom point on the segment through p1..p2 (p0/p3 shape the tangents)
 // — turns the traced step points into a visually smooth curve rather than a
-// jointed polyline.
+// jointed polyline. Works componentwise over however many numbers each point
+// has, so the same function smooths plain [x,y] screen points and [x,y,mag]
+// triples alike (the local-magnitude channel gets smoothed right along with
+// position, so colour/width also ramp smoothly rather than jumping between
+// the raw traced samples).
 function catmullRom(p0,p1,p2,p3,t){
-  const t2=t*t, t3=t2*t;
-  return [
-    0.5*((2*p1[0])+(-p0[0]+p2[0])*t+(2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+(-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
-    0.5*((2*p1[1])+(-p0[1]+p2[1])*t+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3),
-  ];
+  const t2=t*t, t3=t2*t, n=p1.length, out=new Array(n);
+  for(let k=0;k<n;k++){
+    out[k]=0.5*((2*p1[k])+(-p0[k]+p2[k])*t+(2*p0[k]-5*p1[k]+4*p2[k]-p3[k])*t2+(-p0[k]+3*p1[k]-3*p2[k]+p3[k])*t3);
+  }
+  return out;
 }
 function smoothPolyline(pts, perSeg){
   if(pts.length<3) return pts.slice();
@@ -1157,68 +1190,136 @@ function smoothPolyline(pts, perSeg){
   return out;
 }
 
-// a smooth, tapered streamline ribbon (thick at the base, narrowing along
-// the curve) through arbitrarily many screen-space points, ending in a
-// arrowhead flare — sized in fixed SCREEN pixels (not a fraction of the
-// curve) so it reads clearly whether the streamline is long or a short fork,
-// zoomed in or out — with a sharp point so the drift direction is
-// unambiguous at a glance.
-function drawTaperedStreamline(ctx, rawPts, baseWidth){
-  const pts=smoothPolyline(rawPts, 4);
+// Colour ramp for local flow strength: negligible flow reads as thin and
+// almost black, strengthening through dark purple, a magenta/red-orange
+// transition, orange, and finally a bright yellow at the strongest flow
+// anywhere in view — an inferno-style heat ramp. A handful of stops linearly
+// interpolated per point is indistinguishable from a true smooth gradient at
+// this line thickness, for a fraction of the cost. Two variants: the panel
+// background flips between near-black and near-white with the app's own
+// light/dark toggle, and pure black-on-black or pale-yellow-on-white would
+// both disappear, so the two ends of the ramp are nudged to stay visible
+// against whichever background is live; the purple/magenta/orange middle
+// (already mid-luminance) is shared.
+const FLOW_RAMP_DARK = [
+  [0.00, 36,  32,  40 ],   // dim charcoal — reads as "black" but stays visible on the dark panel
+  [0.16, 58,  16,  84 ],   // dark purple
+  [0.34, 118, 30,  120],   // purple
+  [0.52, 190, 56,  96 ],   // lighter purple turning toward red/orange
+  [0.68, 228, 92,  36 ],   // orange
+  [0.84, 248, 162, 24],   // amber (intermediate step toward yellow)
+  [1.00, 255, 234, 20 ],   // bright yellow
+];
+const FLOW_RAMP_LIGHT = [
+  [0.00, 20,  17,  22 ],   // near-black — reads clearly on the light panel
+  [0.16, 55,  16,  80 ],   // dark purple
+  [0.34, 112, 28,  116],   // purple
+  [0.52, 178, 48,  86 ],   // lighter purple turning toward red/orange
+  [0.68, 206, 84,  24 ],   // orange
+  [0.84, 210, 132, 10],   // amber
+  [1.00, 216, 160, 0  ],   // deep gold — a pale yellow would wash out on a light background
+];
+const currentFlowRamp = ()=> document.body.dataset.theme==='light' ? FLOW_RAMP_LIGHT : FLOW_RAMP_DARK;
+function flowRampColor(t, ramp){
+  t=clamp(t,0,1);
+  let i=0;
+  while(i<ramp.length-2 && t>ramp[i+1][0]) i++;
+  const [t0,r0,g0,b0]=ramp[i], [t1,r1,g1,b1]=ramp[i+1];
+  const f=(t1>t0)?(t-t0)/(t1-t0):0;
+  return `rgb(${Math.round(r0+(r1-r0)*f)},${Math.round(g0+(g1-g0)*f)},${Math.round(b0+(b1-b0)*f)})`;
+}
+
+// small deterministic pseudo-random in [0,1) keyed on a streamline's seed —
+// used to decide which streamlines get a mid-line arrowhead so the choice is
+// stable frame to frame (a real Math.random() would flicker on every redraw
+// during a zoom/pan gesture) while still varying line to line.
+function pseudoRand(n){ const x=Math.sin(n*12.9898)*43758.5453; return x-Math.floor(x); }
+
+// fills one solid-colour ribbon segment through screen-space points
+// pts[i] = [x, y, halfWidth] (per-point half width, already computed by the
+// caller) — a plain perpendicular-offset ribbon with flat end caps, no flare.
+function fillRibbonRun(ctx, pts){
   const n=pts.length; if(n<2) return;
-  // find where the head starts by walking back from the tip until we're a
-  // fixed STRAIGHT-LINE (not path-length) distance away — the traced paths
-  // can curl tightly near the field's convergence point, so anchoring on
-  // path length could put "headIdx" only a couple screen pixels from the
-  // tip even after walking back many points, collapsing the flare into a
-  // shapeless blob; Euclidean distance keeps the head a real, visible size
-  // regardless of how much the last stretch of the curve wiggles.
-  const HEAD_LEN=Math.max(9, baseWidth*2.3);
-  const tip=pts[n-1];
-  let headIdx=0;
-  for(let i=n-2;i>=0;i--){
-    headIdx=i;
-    if(Math.hypot(pts[i][0]-tip[0], pts[i][1]-tip[1])>=HEAD_LEN) break;
-  }
   const left=[], right=[];
-  for(let i=0;i<=headIdx;i++){
-    const t=headIdx>0 ? i/headIdx : 0;
+  for(let i=0;i<n;i++){
     const p=pts[i], pa=pts[Math.max(0,i-1)], pb=pts[Math.min(n-1,i+1)];
     let tx=pb[0]-pa[0], ty=pb[1]-pa[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
-    const nx=-ty, ny=tx, w=baseWidth*0.5*Math.pow(1-t*0.7,0.8);
+    const nx=-ty, ny=tx, w=p[2];
     left.push([p[0]+nx*w, p[1]+ny*w]); right.push([p[0]-nx*w, p[1]-ny*w]);
   }
-  const hb=pts[headIdx];
-  let htx=tip[0]-hb[0], hty=tip[1]-hb[1]; const htl=Math.hypot(htx,hty)||1e-6; htx/=htl; hty/=htl;
-  const hnx=-hty, hny=htx, flareW=baseWidth*0.95;   // wider than the shaft: the arrow's "wings"
   ctx.beginPath();
-  if(left.length){
-    ctx.moveTo(left[0][0],left[0][1]);
-    for(let i=1;i<left.length;i++) ctx.lineTo(left[i][0],left[i][1]);
-  } else ctx.moveTo(hb[0]+hnx*flareW, hb[1]+hny*flareW);
-  ctx.lineTo(hb[0]+hnx*flareW, hb[1]+hny*flareW);
-  ctx.lineTo(tip[0], tip[1]);                       // arrowhead tip — unambiguously points downstream
-  ctx.lineTo(hb[0]-hnx*flareW, hb[1]-hny*flareW);
-  for(let i=right.length-1;i>=0;i--) ctx.lineTo(right[i][0],right[i][1]);
-  ctx.closePath(); ctx.fill();
+  ctx.moveTo(left[0][0], left[0][1]);
+  for(let i=1;i<n;i++) ctx.lineTo(left[i][0], left[i][1]);
+  for(let i=n-1;i>=0;i--) ctx.lineTo(right[i][0], right[i][1]);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// draws one streamline as a sequence of colour/width "runs": at every point
+// the LOCAL interpolated flow speed (carried on the point since
+// buildStreamlines — not one magnitude for the whole line) sets both the
+// ribbon's half-width (thin where flow is weak, up to FLOW_MAX_WIDTH where
+// it's strongest) and a bucket along FLOW_RAMP. Consecutive points that land
+// in the same bucket are merged into a single fillRibbonRun() call, so a
+// fairly uniform stretch of flow costs one fill — only where the local speed
+// actually crosses into a new bucket does the line get an extra seam — while
+// width still varies continuously point-by-point within a run. No arrowhead
+// at the tip any more; instead about 40% of streamlines get one small
+// arrowhead partway along their length (see the mid-line block below).
+function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
+  const pts=smoothPolyline(rawPts, 4);
+  const n=pts.length; if(n<2) return;
+  const widthScale=(isBranch?0.72:1)*0.5;
+  const tArr=pts.map(p=>clamp(p[2]/maxMag,0,1));
+  const wArr=tArr.map(t=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale);
+  const lvlArr=tArr.map(t=>Math.min(FLOW_COLOR_LEVELS-1, Math.floor(t*FLOW_COLOR_LEVELS)));
+  let runStart=0;
+  for(let i=1;i<n;i++){
+    if(lvlArr[i]!==lvlArr[runStart] || i===n-1){
+      const runPts=[];
+      for(let k=runStart;k<=i;k++) runPts.push([pts[k][0],pts[k][1],wArr[k]]);
+      const avgT=(tArr[runStart]+tArr[i])/2;
+      ctx.fillStyle=flowRampColor(avgT, ramp);
+      ctx.globalAlpha=lerp(0.32,0.95,avgT)*(isBranch?0.78:1);
+      fillRibbonRun(ctx, runPts);
+      runStart=i;   // next run starts at this shared boundary point — no gap
+    }
+  }
+  // occasional mid-line arrowhead: a small triangle at ~50% along the curve,
+  // oriented on the local tangent, sized/coloured from the local field there
+  if(pseudoRand(seed+0.137)<0.4){
+    const mid=Math.min(n-2, Math.max(1, Math.round(n*0.5)));
+    const a=pts[mid-1], b=pts[mid+1], p=pts[mid];
+    let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const nx=-ty, ny=tx;
+    const halfW=wArr[mid], flareW=halfW*2.1, len=Math.max(7, halfW*4.2);
+    const tipX=p[0]+tx*len*0.55, tipY=p[1]+ty*len*0.55;
+    const backX=p[0]-tx*len*0.45, backY=p[1]-ty*len*0.45;
+    ctx.fillStyle=flowRampColor(tArr[mid], ramp);
+    ctx.globalAlpha=lerp(0.5,1,tArr[mid])*(isBranch?0.78:1);
+    ctx.beginPath();
+    ctx.moveTo(backX+nx*flareW, backY+ny*flareW);
+    ctx.lineTo(tipX, tipY);
+    ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
+    ctx.closePath();
+    ctx.fill();
+  }
 }
 
 function renderFlowFieldStreamlines(cache){
   const ctx=$('flowCanvas').getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
-  ctx.fillStyle=cvar('--flow');
-  const maxMag=Math.max(1e-6, ...cache.rawMag);
-  // thinner when zoomed all the way out (see TU_LOD_ZOOM) — recomputed every
-  // call, including mid-gesture reprojection, so width tracks zoom smoothly
-  // even though the underlying streamlines themselves only retrace on settle
+  const maxMag=cache.magRef || Math.max(1e-6, ...cache.rawMag);
+  const ramp=currentFlowRamp();
+  // thinner ceiling when zoomed all the way out (see TU_LOD_ZOOM) — recomputed
+  // every call, including mid-gesture reprojection, so width tracks zoom
+  // smoothly even though the underlying streamlines only retrace on settle
   const baseW=lerp(FLOW_MAX_WIDTH*0.36, FLOW_MAX_WIDTH, tuLod());
   cache.streamlines.forEach(line=>{
-    const screenPts=line.pts.map(([x,y])=>_tu.map(x,y));
+    const screenPts=line.pts.map(([x,y,m])=>{ const p=_tu.map(x,y); return [p[0],p[1],m]; });
     if(screenPts.length<2) return;
     const isBranch = line.seed % 1 !== 0;
-    const mag = cache.rawMag[Math.min(Math.floor(line.seed), cache.rawMag.length-1)]/maxMag;
-    ctx.globalAlpha=clamp((isBranch?0.22:0.3)+0.55*mag, 0.22, 0.9);
-    drawTaperedStreamline(ctx, screenPts, baseW*(isBranch?0.72:1));
+    drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch, line.seed, ramp);
   });
   ctx.globalAlpha=1;
 }
