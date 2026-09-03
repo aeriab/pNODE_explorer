@@ -1645,6 +1645,28 @@ function renderAbxGutter(){
 // --------------------------------------------------------------------- //
 let drag=null, readoutDrag=null, tuDrag=false;
 function refreshReadoutViews(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); }
+
+// Fast path for a readout-cursor drag. The stacked composition chart, the
+// observed-abundance bars and the antibiotic lanes do NOT depend on the
+// readout DAY — only the position of the vertical cursor line does — yet
+// refreshReadoutViews() rebuilds each of those SVGs from scratch every
+// pointermove (drawPredicted alone lays out ~130 stacked-area paths). That
+// full rebuild, not any TaxUMAP work, is what makes dragging the cursor feel
+// heavy while the map panel is closed. Here we just slide the existing cursor
+// elements, and only touch the TaxUMAP (its dot/path, and the flow field when
+// "match administered" is on) when its panel is actually visible.
+function moveReadoutCursor(){
+  const x=xDay(S.readoutDay);
+  [['compSvg',true],['obsSvg',true],['abxSvg',false]].forEach(([id,hasHandle])=>{
+    const svg=$(id); if(!svg) return;
+    svg.querySelectorAll('.readout-line').forEach(l=>{ l.setAttribute('x1',x); l.setAttribute('x2',x); });
+    if(hasHandle){
+      const h=svg.querySelector('.readout-handle');
+      if(h) h.setAttribute('d',`M${x-6},4 L${x+6},4 L${x},13 Z`);
+    }
+  });
+  if(tuPanelActive()) renderTaxumap();
+}
 function setupPointer(){   // attached ONCE from init()
   const near=(ev,sv)=> Math.abs(localX(ev,sv)-xDay(S.readoutDay))<7;
   // trajectory / observed-abundance charts: click anywhere to jump the readout
@@ -1682,12 +1704,12 @@ function setupPointer(){   // attached ONCE from init()
     if(tuDrag){
       const [x,y]=localXY(ev,$('taxumapSvg'));
       const idx=nearestTaxumapIndex(x,y);
-      if(idx!=null){ S.readoutDay=_tu.days[idx]; refreshReadoutViews(); }
+      if(idx!=null){ S.readoutDay=_tu.days[idx]; moveReadoutCursor(); }
       return;
     }
     if(readoutDrag){
       S.readoutDay=clamp(Math.round(dayFromX(localX(ev,readoutDrag))), S.t0, S.t0+S.horizon);
-      refreshReadoutViews(); return;
+      moveReadoutCursor(); return;
     }
     if(drag){
       drag.cur=snap(dayFromX(localX(ev,abx)));
