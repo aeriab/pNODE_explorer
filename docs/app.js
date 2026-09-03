@@ -1350,7 +1350,7 @@ function fillRibbonRun(ctx, pts){
 // spacing (see the arrowhead block below), so every visible stretch of flow —
 // each branch and each merged tributary is its own line here — carries clear
 // direction cues.
-const ARROW_SPACING = 30;   // px of screen length between successive arrowheads on a line
+const ARROW_SPACING = 120;  // px of screen length between successive arrowheads on a line
 const ARROW_SIZE = 1.55;    // size multiplier vs the earlier single-arrowhead look
 
 // one filled direction chevron on the local tangent at smoothed point i
