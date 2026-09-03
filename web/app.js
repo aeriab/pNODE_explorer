@@ -1536,7 +1536,14 @@ function setupFlowControls(){
   $('flowToggle').addEventListener('change',(e)=>{
     const checked=e.target.checked;
     $('perturbPanel').classList.toggle('hidden', !checked);
-    setTimeout(()=>{ S.flowOn=checked; if(S.fc) renderTaxumap(); },0);
+    // turning flow lines on defaults to "match antibiotics administered" so the
+    // field immediately reflects what the patient is actually receiving
+    if(checked){ $('perturbMatchToggle').checked=true; S.matchAdministered=true; }
+    setTimeout(()=>{
+      S.flowOn=checked;
+      if(checked && S.matchAdministered) syncPerturbToAdministered();
+      if(S.fc) renderTaxumap();
+    },0);
   });
   $('perturbMatchToggle').addEventListener('change',(e)=>{
     const checked=e.target.checked;
