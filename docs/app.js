@@ -960,7 +960,8 @@ const FLOW_SUPPORT_MIN_W = 0.05; // minimum inverse-distance weight from the nea
                                   // point counts as having real sample support; below this the field is
                                   // masked (Schluter et al. 2023: "masking grid regions with little support
                                   // from real samples") instead of extrapolating a direction from far away
-const STREAM_SEEDS = 70;          // long curved streamlines drawn (subsampled from the sample vectors)
+const STREAM_SEEDS = 52;          // long curved streamlines drawn (subsampled from the sample vectors) —
+                                  // ~3/4 of the earlier count: fewer, bolder lines rather than a dense mesh
 const STREAM_STEPS = 16;          // forward integration steps per streamline (data-space, field-guided)
 const STREAM_BRANCH_AT = 7;       // step index where ~1/3 of streamlines fork off a second thread
 const STREAM_BRANCH_LEN = 7;      // steps traced along a fork
@@ -1269,7 +1270,7 @@ function fillRibbonRun(ctx, pts){
 function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
-  const widthScale=(isBranch?0.72:1)*0.5;
+  const widthScale=(isBranch?0.72:1)*1.0;   // ~2x the earlier flow-line thickness
   const tArr=pts.map(p=>clamp(p[2]/maxMag,0,1));
   const wArr=tArr.map(t=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale);
   const lvlArr=tArr.map(t=>Math.min(FLOW_COLOR_LEVELS-1, Math.floor(t*FLOW_COLOR_LEVELS)));
@@ -1788,5 +1789,17 @@ function setupTutorial(){
     }, {passive:false});
   });
 }
+
+// tiny faint "deployed commit" tag, top-right. A file committed to git can't
+// contain its own commit hash, so resolve it live from GitHub — this always
+// reflects whatever's actually on main. Silently stays blank if offline / rate
+// limited.
+(function showCommitTag(){
+  const el=$('commitTag'); if(!el) return;
+  fetch('https://api.github.com/repos/aeriab/pNODE_explorer/commits/main')
+    .then(r=> r.ok ? r.json() : null)
+    .then(j=>{ if(j && j.sha) el.textContent=j.sha.slice(0,7); })
+    .catch(()=>{});
+})();
 
 init().catch(e=>{ console.error(e); alert('init failed: '+e.message); });
