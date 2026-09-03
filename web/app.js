@@ -966,6 +966,11 @@ const STREAM_STEPS = 16;          // forward integration steps per streamline (d
 const STREAM_BRANCH_AT = 7;       // step index where ~1/3 of streamlines fork off a second thread
 const STREAM_BRANCH_LEN = 7;      // steps traced along a fork
 const STREAM_BRANCH_ANGLE = 0.36; // radians (~21°) a fork rotates away from the main flow
+const STREAM_MERGE_DIST_FRAC = 0.65; // how close (as a fraction of the field kernel width sigma) a streamline
+                                     // must come to an already-traced one before it snaps onto it and the two
+                                     // render as a single channel — the converging-streamline look of the
+                                     // flow plots in Schluter et al. 2023, rather than a parallel bundle
+const FLOW_MERGE_MAX_WIDEN = 2.6;    // cap on how much a fully-merged trunk widens / brightens vs a lone line
 
 // spatial subsample of TaxUMAP reference indices, one real observed sample
 // per grid cell, spanning the FIXED full reference map (info.bounds) — not
@@ -1122,6 +1127,17 @@ function sampleFlowField(vectors, dirs, mags, sigma2, x, y){
 // carried along so the renderer can vary colour/width along the streamline
 // instead of using one value for the whole line. This only touches the
 // already-computed sample vectors — no extra model calls.
+//
+// STREAMLINE MERGING: lines are traced one at a time and every point of an
+// accepted line goes into a spatial hash. While tracing a new line, if it
+// ever runs within STREAM_MERGE_DIST_FRAC·sigma of an already-traced line it
+// snaps its last point onto that line and stops — so a bundle of near-
+// parallel lines converging on the same attractor collapses into one shared
+// channel instead of a smear of overlapping strokes. The flow each merged
+// line was carrying is then accumulated onto its trunk from the junction
+// downstream (`.acc` per point), and the renderer widens + brightens the
+// trunk in proportion, reproducing the "tributaries joining a river" look of
+// the streamline plots in Schluter et al. 2023.
 function buildStreamlines(vectors, dirs, mags, bounds){
   if(!vectors.length) return [];
   const [xmin,xmax,ymin,ymax]=bounds;
@@ -1129,34 +1145,98 @@ function buildStreamlines(vectors, dirs, mags, bounds){
   const sigma=(L/FLOW_GRID)*1.4, sigma2=sigma*sigma, stepData=sigma*0.5;
   const stride=Math.max(1, Math.ceil(vectors.length/STREAM_SEEDS));
   const lines=[];
-  for(let i=0;i<vectors.length;i+=stride){
-    let x=vectors[i][0], y=vectors[i][1];
-    const main=[[x,y,mags[i]]];
-    let branchAt=null, branchDir=null, branchMag=mags[i];
+
+  // spatial hash over accepted-line points, cell size == merge radius so a
+  // proximity test only ever scans the 3x3 block of cells around a query
+  const mergeDist=sigma*STREAM_MERGE_DIST_FRAC, mergeDist2=mergeDist*mergeDist;
+  const cell=mergeDist||1e-6, grid=new Map();
+  const cellKey=(x,y)=>Math.floor(x/cell)+','+Math.floor(y/cell);
+  function nearestOnAccepted(x,y){
+    const cx=Math.floor(x/cell), cy=Math.floor(y/cell);
+    let best=null, bd=mergeDist2;
+    for(let gx=cx-1;gx<=cx+1;gx++) for(let gy=cy-1;gy<=cy+1;gy++){
+      const arr=grid.get(gx+','+gy); if(!arr) continue;
+      for(let k=0;k<arr.length;k++){
+        const p=arr[k], dx=p.x-x, dy=p.y-y, d=dx*dx+dy*dy;
+        if(d<bd){ bd=d; best=p; }
+      }
+    }
+    return best;   // {x,y,li,pi} or null
+  }
+  function registerLine(li){
+    const pts=lines[li].pts;
+    for(let pi=0;pi<pts.length;pi++){
+      const k=cellKey(pts[pi][0],pts[pi][1]);
+      let arr=grid.get(k); if(!arr){ arr=[]; grid.set(k,arr); }
+      arr.push({x:pts[pi][0], y:pts[pi][1], li, pi});
+    }
+  }
+  // trace one path from (sx,sy); `skipMerge` steps are exempt from the merge
+  // test (used so a fork doesn't instantly re-merge into its own parent).
+  // Returns {branchAt,branchDir,branchMag} of the accepted line, or null if
+  // the seed sat right on an existing line (skipped as redundant).
+  function trace(sx, sy, sMag, seed, forks, skipMerge){
+    if(nearestOnAccepted(sx,sy)) return null;
+    let x=sx, y=sy;
+    const pts=[[x,y,sMag]];
+    let parent=null, joinIdx=0;
+    let branchAt=null, branchDir=null, branchMag=sMag;
     for(let s=0;s<STREAM_STEPS;s++){
       const f=sampleFlowField(vectors,dirs,mags,sigma2,x,y); if(!f) break;
       x+=f.dir[0]*stepData; y+=f.dir[1]*stepData;
-      main.push([x,y,f.mag]);
-      if(s===STREAM_BRANCH_AT && (i/stride)%3===0){ branchAt=[x,y]; branchDir=f.dir; branchMag=f.mag; }
-    }
-    lines.push({pts:main, seed:i});
-    if(branchAt){
-      const sign=((i/stride)%6<3)?1:-1;
-      const c=Math.cos(STREAM_BRANCH_ANGLE*sign), s2=Math.sin(STREAM_BRANCH_ANGLE*sign);
-      let bx=branchAt[0], by=branchAt[1];
-      let bdx=branchDir[0]*c-branchDir[1]*s2, bdy=branchDir[0]*s2+branchDir[1]*c;
-      const branch=[[bx,by,branchMag]];
-      for(let s=0;s<STREAM_BRANCH_LEN;s++){
-        const f=sampleFlowField(vectors,dirs,mags,sigma2,bx,by); if(!f) break;
-        // blend the local field back in so the fork bends with real drift
-        // instead of shooting off in a straight line
-        let dx=f.dir[0]+bdx*0.6, dy=f.dir[1]+bdy*0.6, dl=Math.hypot(dx,dy)||1e-9; dx/=dl; dy/=dl;
-        bx+=dx*stepData; by+=dy*stepData;
-        branch.push([bx,by,f.mag]); bdx=dx; bdy=dy;
+      if(s>=skipMerge){
+        const hit=nearestOnAccepted(x,y);
+        if(hit){
+          pts.push([hit.x, hit.y, (f.mag+lines[hit.li].pts[hit.pi][2])*0.5]);
+          parent=hit.li; joinIdx=hit.pi;
+          break;
+        }
       }
-      lines.push({pts:branch, seed:i+0.5});
+      pts.push([x,y,f.mag]);
+      if(s===STREAM_BRANCH_AT && forks){ branchAt=[x,y]; branchDir=f.dir; branchMag=f.mag; }
     }
+    lines.push({pts, seed, parent, joinIdx});
+    registerLine(lines.length-1);
+    return {branchAt, branchDir, branchMag};
   }
+
+  for(let i=0;i<vectors.length;i+=stride){
+    const res=trace(vectors[i][0], vectors[i][1], mags[i], i, (i/stride)%3===0, 1);
+    if(!res || !res.branchAt) continue;
+    // a fork: rotate off the main flow, then let the field bend it back
+    const sign=((i/stride)%6<3)?1:-1;
+    const c=Math.cos(STREAM_BRANCH_ANGLE*sign), s2=Math.sin(STREAM_BRANCH_ANGLE*sign);
+    let bx=res.branchAt[0], by=res.branchAt[1];
+    let bdx=res.branchDir[0]*c-res.branchDir[1]*s2, bdy=res.branchDir[0]*s2+res.branchDir[1]*c;
+    const branch=[[bx,by,res.branchMag]];
+    let bparent=null, bjoin=0;
+    for(let s=0;s<STREAM_BRANCH_LEN;s++){
+      const f=sampleFlowField(vectors,dirs,mags,sigma2,bx,by); if(!f) break;
+      let dx=f.dir[0]+bdx*0.6, dy=f.dir[1]+bdy*0.6, dl=Math.hypot(dx,dy)||1e-9; dx/=dl; dy/=dl;
+      bx+=dx*stepData; by+=dy*stepData;
+      if(s>=3){   // let it clear its own parent line before it can merge
+        const hit=nearestOnAccepted(bx,by);
+        if(hit){ branch.push([hit.x,hit.y,(f.mag+lines[hit.li].pts[hit.pi][2])*0.5]); bparent=hit.li; bjoin=hit.pi; break; }
+      }
+      branch.push([bx,by,f.mag]); bdx=dx; bdy=dy;
+    }
+    lines.push({pts:branch, seed:i+0.5, parent:bparent, joinIdx:bjoin});
+    registerLine(lines.length-1);
+  }
+
+  // flow accumulation. A line can only ever merge into an EARLIER-created one,
+  // so descending index order visits every tributary before its trunk: push
+  // each line's arriving flow (its accumulation at the junction) onto the
+  // trunk from the join point to the trunk's end. Trunks that themselves merge
+  // then carry the combined total onward.
+  const acc=lines.map(l=>{ const a=new Float64Array(l.pts.length); a.fill(1); return a; });
+  for(let li=lines.length-1;li>=0;li--){
+    const par=lines[li].parent; if(par==null) continue;
+    const arriving=acc[li][acc[li].length-1];
+    const pa=acc[par], j=Math.min(lines[li].joinIdx, pa.length-1);
+    for(let k=j;k<pa.length;k++) pa[k]+=arriving;
+  }
+  lines.forEach((l,li)=>{ l.acc=acc[li]; });
   return lines;
 }
 
@@ -1271,15 +1351,21 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
   const widthScale=(isBranch?0.72:1)*1.0;   // ~2x the earlier flow-line thickness
+  // p[3] = accumulated flow (1 for a line no other line merged into, higher on
+  // a trunk downstream of one or more junctions). sqrt keeps the widening/
+  // brightening sub-linear and capped so a heavily-merged trunk reads as one
+  // bold channel without swamping the map.
+  const accW=pts.map(p=>Math.min(FLOW_MERGE_MAX_WIDEN, Math.sqrt(Math.max(1, p[3]||1))));
   const tArr=pts.map(p=>clamp(p[2]/maxMag,0,1));
-  const wArr=tArr.map(t=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale);
-  const lvlArr=tArr.map(t=>Math.min(FLOW_COLOR_LEVELS-1, Math.floor(t*FLOW_COLOR_LEVELS)));
+  const cArr=pts.map((p,i)=>clamp(tArr[i]*(1+0.16*(accW[i]-1)),0,1));   // colour/alpha run hotter where merged
+  const wArr=tArr.map((t,i)=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale*accW[i]);
+  const lvlArr=cArr.map(t=>Math.min(FLOW_COLOR_LEVELS-1, Math.floor(t*FLOW_COLOR_LEVELS)));
   let runStart=0;
   for(let i=1;i<n;i++){
     if(lvlArr[i]!==lvlArr[runStart] || i===n-1){
       const runPts=[];
       for(let k=runStart;k<=i;k++) runPts.push([pts[k][0],pts[k][1],wArr[k]]);
-      const avgT=(tArr[runStart]+tArr[i])/2;
+      const avgT=(cArr[runStart]+cArr[i])/2;
       ctx.fillStyle=flowRampColor(avgT, ramp);
       ctx.globalAlpha=lerp(0.32,0.95,avgT)*(isBranch?0.78:1);
       fillRibbonRun(ctx, runPts);
@@ -1296,8 +1382,8 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
     const halfW=wArr[mid], flareW=halfW*2.1, len=Math.max(7, halfW*4.2);
     const tipX=p[0]+tx*len*0.55, tipY=p[1]+ty*len*0.55;
     const backX=p[0]-tx*len*0.45, backY=p[1]-ty*len*0.45;
-    ctx.fillStyle=flowRampColor(tArr[mid], ramp);
-    ctx.globalAlpha=lerp(0.5,1,tArr[mid])*(isBranch?0.78:1);
+    ctx.fillStyle=flowRampColor(cArr[mid], ramp);
+    ctx.globalAlpha=lerp(0.5,1,cArr[mid])*(isBranch?0.78:1);
     ctx.beginPath();
     ctx.moveTo(backX+nx*flareW, backY+ny*flareW);
     ctx.lineTo(tipX, tipY);
@@ -1317,7 +1403,8 @@ function renderFlowFieldStreamlines(cache){
   // smoothly even though the underlying streamlines only retrace on settle
   const baseW=lerp(FLOW_MAX_WIDTH*0.36, FLOW_MAX_WIDTH, tuLod());
   cache.streamlines.forEach(line=>{
-    const screenPts=line.pts.map(([x,y,m])=>{ const p=_tu.map(x,y); return [p[0],p[1],m]; });
+    const acc=line.acc;
+    const screenPts=line.pts.map(([x,y,m],i)=>{ const p=_tu.map(x,y); return [p[0],p[1],m, acc?acc[i]:1]; });
     if(screenPts.length<2) return;
     const isBranch = line.seed % 1 !== 0;
     drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch, line.seed, ramp);
