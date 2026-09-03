@@ -746,10 +746,17 @@ function setupTaxumapZoom(){
 // bitmap with drawImage — an O(1) op regardless of point count, since the
 // map/pan/zoom is a pure affine transform (uniform scale + translate, no
 // rotation), a cached raster can be re-scaled/re-translated and stay pixel-
-// exact modulo raster resolution. The snapshot is refreshed (one real
-// 10k-point redraw) once the gesture settles, so the map always ends up
-// pixel-crisp; only the handful of frames mid-gesture trade a touch of
-// raster softness for staying smooth — the same tradeoff map apps make.
+// exact modulo raster resolution.
+//
+// The snapshot only holds what was on screen when it was taken, so it can
+// ONLY be reused while it still fully covers the viewport — i.e. while
+// zooming in or panning a little. The moment an edge of it would pull inside
+// the viewport (any zoom-out, or a pan far enough that a margin shows), we
+// fall through to a real full redraw for that frame instead, so a dot that
+// has moved off screen and back is never missing. The snapshot is also
+// refreshed by every non-gesture redraw (initial draw, gesture settle, panel
+// re-expand), so the fast path picks straight back up from the new position.
+//
 // The backdrop dots and flow-field streamlines are drawn a touch thinner
 // when zoomed all the way out (purely a stroke/dot-radius tweak, not a point
 // count — every reference point is always drawn, none are ever dropped) and
@@ -765,11 +772,19 @@ function drawTaxumapBackdrop(fromCache){
   if(fromCache && _tuBackdropSnap){
     const scale=S.tuZoom/_tuBackdropSnap.zoom;
     const tx=S.tuPan.x - scale*_tuBackdropSnap.pan.x, ty=S.tuPan.y - scale*_tuBackdropSnap.pan.y;
-    ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
-    ctx.clearRect(0,0,_tu.w,_tu.h);
-    ctx.setTransform(_tu.dpr*scale,0,0,_tu.dpr*scale, _tu.dpr*tx, _tu.dpr*ty);
-    ctx.drawImage(_tuBackdropSnap.canvas, 0, 0, _tu.w, _tu.h);
-    return;
+    // the cached raster spans exactly the viewport at snap time; after this
+    // transform it occupies [tx, tx+scale*w] x [ty, ty+scale*h] on screen.
+    // Reuse it only if that still blankets the whole viewport — otherwise a
+    // real repaint below, so nothing that scrolled off screen goes missing.
+    const covers = tx<=0.5 && ty<=0.5 &&
+                   tx+scale*_tu.w>=_tu.w-0.5 && ty+scale*_tu.h>=_tu.h-0.5;
+    if(covers){
+      ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+      ctx.clearRect(0,0,_tu.w,_tu.h);
+      ctx.setTransform(_tu.dpr*scale,0,0,_tu.dpr*scale, _tu.dpr*tx, _tu.dpr*ty);
+      ctx.drawImage(_tuBackdropSnap.canvas, 0, 0, _tu.w, _tu.h);
+      return;
+    }
   }
   const info=TAXUMAP.info();
   const bd=info.bdCoords, cls=info.bdClass, colors=info.classColors;
@@ -798,12 +813,18 @@ function drawTaxumapBackdrop(fromCache){
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   ctx.clearRect(0,0,_tu.w,_tu.h);
   paint(ctx);
-  const snap=document.createElement('canvas');
-  snap.width=Math.round(_tu.w*_tu.dpr); snap.height=Math.round(_tu.h*_tu.dpr);
-  const sctx=snap.getContext('2d');
-  sctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
-  paint(sctx);
-  _tuBackdropSnap={canvas:snap, zoom:S.tuZoom, pan:{x:S.tuPan.x,y:S.tuPan.y}};
+  // refresh the cached raster only on a non-gesture redraw — a gesture frame
+  // that fell through to here (a zoom-out / big pan) is already paying for a
+  // full paint; a second one into the offscreen canvas every frame is not
+  // worth it, and the settle redraw will refresh the snapshot anyway.
+  if(!fromCache){
+    const snap=document.createElement('canvas');
+    snap.width=Math.round(_tu.w*_tu.dpr); snap.height=Math.round(_tu.h*_tu.dpr);
+    const sctx=snap.getContext('2d');
+    sctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+    paint(sctx);
+    _tuBackdropSnap={canvas:snap, zoom:S.tuZoom, pan:{x:S.tuPan.x,y:S.tuPan.y}};
+  }
 }
 
 // TAXUMAP.project() is an O(nRef≈10k) kNN search (~1.6ms/call) — projecting
