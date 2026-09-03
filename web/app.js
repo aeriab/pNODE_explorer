@@ -725,6 +725,12 @@ function setupTaxumapZoom(){
     clampTuPan();
     scheduleTuGestureRedraw(fCanvas);
   }, {passive:false});
+  // the perturbations checklist floats over the map inside #taxumapWrap, so a
+  // wheel over it would otherwise bubble to the handler above and zoom/pan the
+  // map. Keep the gesture inside the panel: stop it reaching the map handler
+  // and let the browser scroll the (overflow:auto) list natively.
+  const pPanel=$('perturbPanel');
+  if(pPanel) pPanel.addEventListener('wheel',(e)=>{ e.stopPropagation(); }, {passive:true});
   wrap.addEventListener('dblclick', ()=>{
     S.tuZoom=1; S.tuPan={x:0,y:0};
     if(isExpanded('tuPanel')){ drawTaxumapBackdrop(false); renderTaxumapPathSvg(); taxumapMoveDot(); drawFlowField(false); }
@@ -1344,30 +1350,38 @@ function fillRibbonRun(ctx, pts){
 // spacing (see the arrowhead block below), so every visible stretch of flow —
 // each branch and each merged tributary is its own line here — carries clear
 // direction cues.
-const ARROW_SPACING = 34;   // px of screen length between successive arrowheads on a line
-const ARROW_SIZE = 1.4;     // size multiplier vs the earlier single-arrowhead look
+const ARROW_SPACING = 22;   // px of screen length between successive arrowheads on a line —
+                            // deliberately dense: a single streamline should carry ~5-10 chevrons
+const ARROW_SIZE = 1.55;    // size multiplier vs the earlier single-arrowhead look
 
-// one filled direction chevron on the local tangent at smoothed point i
-function drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch){
+// one filled direction chevron on the local tangent at smoothed point i, with
+// a contrasting outline so it stays legible over any streamline colour / the
+// backdrop cloud
+function drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch, outline){
   const n=pts.length; i=Math.min(n-2, Math.max(1, i));
   const a=pts[i-1], b=pts[i+1], p=pts[i];
   let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
   const nx=-ty, ny=tx;
   const halfW=Math.max(wArr[i], 1.2);
-  const flareW=halfW*2.2*ARROW_SIZE, len=Math.max(9, halfW*4.6)*ARROW_SIZE;
+  const flareW=clamp(halfW*2.0*ARROW_SIZE, 6, 11);
+  const len=clamp(halfW*4.2*ARROW_SIZE, 12, 22);
   const tipX=p[0]+tx*len*0.55, tipY=p[1]+ty*len*0.55;
   const backX=p[0]-tx*len*0.45, backY=p[1]-ty*len*0.45;
-  ctx.fillStyle=flowRampColor(cArr[i], ramp);
-  ctx.globalAlpha=lerp(0.55,1,cArr[i])*(isBranch?0.82:1);
   ctx.beginPath();
   ctx.moveTo(backX+nx*flareW, backY+ny*flareW);
   ctx.lineTo(tipX, tipY);
   ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
   ctx.closePath();
+  ctx.fillStyle=flowRampColor(cArr[i], ramp);
+  ctx.globalAlpha=lerp(0.62,1,cArr[i])*(isBranch?0.85:1);
   ctx.fill();
+  ctx.globalAlpha=isBranch?0.82:0.95;
+  ctx.lineWidth=1.3; ctx.lineJoin='round';
+  ctx.strokeStyle=outline;
+  ctx.stroke();
 }
 
-function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
+function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp, outline){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
   const widthScale=(isBranch?0.72:1)*1.0;   // ~2x the earlier flow-line thickness
@@ -1408,7 +1422,7 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
   for(const d of targets){
     if(d-lastD < ARROW_SPACING*0.55) continue;
     let i=1; while(i<n-1 && cum[i]<d) i++;
-    drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch);
+    drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch, outline);
     lastD=d;
   }
 }
@@ -1422,12 +1436,15 @@ function renderFlowFieldStreamlines(cache){
   // every call, including mid-gesture reprojection, so width tracks zoom
   // smoothly even though the underlying streamlines only retrace on settle
   const baseW=lerp(FLOW_MAX_WIDTH*0.36, FLOW_MAX_WIDTH, tuLod());
+  // arrowhead outline: opposite end of the value scale from the panel
+  // background, so the chevrons pop whatever colour the streamline is
+  const outline = document.body.dataset.theme==='light' ? 'rgba(15,12,20,0.9)' : 'rgba(255,255,255,0.92)';
   cache.streamlines.forEach(line=>{
     const acc=line.acc;
     const screenPts=line.pts.map(([x,y,m],i)=>{ const p=_tu.map(x,y); return [p[0],p[1],m, acc?acc[i]:1]; });
     if(screenPts.length<2) return;
     const isBranch = line.seed % 1 !== 0;
-    drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch, line.seed, ramp);
+    drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch, line.seed, ramp, outline);
   });
   ctx.globalAlpha=1;
 }
