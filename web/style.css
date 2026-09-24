@@ -13,7 +13,14 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3; /* Clostridia / Bacteroidia */
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E; /* Verrucomicrobiae / Actinobacteria / Erysipelotrichia */
   --tx-pathobiont:#AA336A; --tx-other:#808080;                          /* Deltaproteobacteria (misc) / removed_taxa */
-  --flow:#8a8a86;
+  /* flow lines are a single fixed, fully-opaque near-black — same in both
+     themes, never colour-coded by strength (see FLOW_COLOR in app.js) */
+  --flow:#161616;
+  /* stroke between adjacent stacked-taxa bands (predicted composition) / bar
+     segments (observed abundance) — matches the dark panel bg in dark mode
+     (a near-invisible seam) but is forced to true black in light mode, where
+     the same near-white value would vanish against the light panel */
+  --band-sep:#1a1a19;
 }
 .viz-root[data-theme="light"]{
   color-scheme: light;
@@ -28,7 +35,7 @@
   --tx-blautia:#AD998C; --tx-faecali:#8C7A6E; --tx-bacteroides:#16DDD3;
   --tx-akkermansia:#CA0BE8; --tx-bifido:#D0D0D0; --tx-innocuum:#FBA22E;
   --tx-pathobiont:#AA336A; --tx-other:#808080;
-  --flow:#4a4a48;
+  --band-sep:#000000;
 }
 
 *{box-sizing:border-box}
@@ -161,10 +168,13 @@ button.sm{padding:5px 9px;font-size:12px}
 .perturb-match input{accent-color:var(--accent)}
 @keyframes tu-pulse{0%{r:11px;opacity:.55}70%{r:22px;opacity:0}100%{r:22px;opacity:0}}
 .tu-dot-halo{animation:tu-pulse 1.8s ease-out infinite}
-/* the readout dot can be grabbed and slid along the predicted path */
+/* the readout dot can be grabbed and slid along the predicted path; the map
+   itself can be click-and-hold dragged to pan (grabbing the dot wins when
+   the pointer starts within its hit radius — see setupPointer in app.js) */
 .tu-dot-core,.tu-dot-halo{cursor:grab}
+#taxumapSvg{cursor:grab}
 body.tu-dragging{cursor:grabbing}
-body.tu-dragging .tu-dot-core,body.tu-dragging .tu-dot-halo{cursor:grabbing}
+body.tu-dragging .tu-dot-core,body.tu-dragging .tu-dot-halo,body.tu-dragging #taxumapSvg{cursor:grabbing}
 .scroll::-webkit-scrollbar{height:10px}
 .scroll::-webkit-scrollbar-thumb{background:var(--axis);border-radius:6px}
 

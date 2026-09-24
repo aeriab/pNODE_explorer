@@ -486,7 +486,7 @@ function drawPredicted(g, y){
     const upper=cum.map((c,i)=>c+vals[ti][i]);
     let d='M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(cum[i]).toFixed(1)}`).join('L');
     d+='L'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(upper[i]).toFixed(1)}`).reverse().join('L')+'Z';
-    g.appendChild(el('path',{d, fill:taxaColor(taxa[ti]), stroke:cvar('--surface-1'),
+    g.appendChild(el('path',{d, fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'),
       'stroke-width':0.6, 'shape-rendering':'geometricPrecision', 'data-taxa':taxa[ti], 'data-idx':ti}));
     cum=upper;
   }
@@ -549,7 +549,7 @@ function drawObservedBars(g, y){
         const yt=y(cum+v), yb=y(cum);
         g.appendChild(el('rect',{x:(xc-barW/2).toFixed(1), y:yt.toFixed(1),
           width:barW.toFixed(1), height:Math.max(yb-yt,0.4).toFixed(1),
-          fill:taxaColor(taxa[ti]), stroke:cvar('--surface-1'), 'stroke-width':0.4,
+          fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'), 'stroke-width':0.4,
           'data-taxa':taxa[ti], 'data-idx':ti, 'data-val':v}));
       }
       cum+=v;
@@ -640,7 +640,7 @@ function renderTaxumap(){
   // when there's nothing on screen yet, so it doesn't read as broken
   $('tuHint').textContent = (S.flowOn && _flowPending && !_flowCache.vectors)
     ? 'computing flow field…'
-    : 'drag the ● to move along the predicted path · scroll to zoom · two fingers to pan';
+    : 'drag the ● to move along the predicted path · drag elsewhere to pan · scroll to zoom';
 }
 
 // _tuBase holds the fixed "fit the whole reference cloud" transform (zoom=1,
@@ -960,12 +960,10 @@ function drawTaxumapLegend(){
 //  and traced into streamlines; regions too far from any real seed to have
 //  support are masked rather than extrapolated into (see FLOW_SUPPORT_MIN_W).
 //  Each traced point also carries the field's LOCAL interpolated speed there
-//  (not just one magnitude for the whole line), so a streamline reads as a
-//  little inferno-style heat ramp along its own length — thin and near-black
-//  where the local flow is weak, through dark purple and a magenta/orange
-//  transition, up to a thick, bright yellow where it's strongest — rather
-//  than one flat colour/width for the entire streamline (see FLOW_RAMP,
-//  drawFlowStreamline).
+//  (not just one magnitude for the whole line), so a streamline still reads
+//  as thin where the local flow is weak and thick where it's strongest, even
+//  though colour is now fixed (one flat, fully-opaque near-black throughout —
+//  see flowColor(), drawFlowStreamline) rather than varying with strength.
 //  The seed grid spans the FULL reference map, fixed in data space — never
 //  the current viewport — so the field is computed once per antibiotic
 //  condition and merely re-projected through the live pan/zoom transform
@@ -984,10 +982,6 @@ const FLOW_MAX_WIDTH = 4.4;   // width at the STRONGEST local flow in view (at f
 const FLOW_MIN_WIDTH_FRAC = 0.16; // width at the WEAKEST local flow, as a fraction of FLOW_MAX_WIDTH —
                                    // thin where flow is negligible, thickening continuously up to
                                    // FLOW_MAX_WIDTH where it's strongest (see drawFlowStreamline)
-const FLOW_COLOR_LEVELS = 14; // number of discrete colour buckets along FLOW_RAMP — kept as a handful
-                               // of solid-fill runs per streamline (not a per-pixel gradient) so this
-                               // stays cheap to draw every frame; 14 is fine-grained enough to read as
-                               // a smooth gradient even though it's technically discrete
 const FLOW_SUPPORT_MIN_W = 0.05; // minimum inverse-distance weight from the nearest seed vectors before a
                                   // point counts as having real sample support; below this the field is
                                   // masked (Schluter et al. 2023: "masking grid regions with little support
@@ -1101,7 +1095,7 @@ function flowChunkStep(){
   _flowPending=null;
   if(S.flowOn && tuPanelActive()){
     drawFlowField(true);   // paint the finished field — data-space cache, just reproject it
-    $('tuHint').textContent='drag the ● to move along the predicted path · scroll to zoom · two fingers to pan';
+    $('tuHint').textContent='drag the ● to move along the predicted path · drag elsewhere to pan · scroll to zoom';
   }
 }
 
@@ -1303,44 +1297,10 @@ function smoothPolyline(pts, perSeg){
   return out;
 }
 
-// Colour ramp for local flow strength: negligible flow reads as thin and
-// almost black, strengthening through dark purple, a magenta/red-orange
-// transition, orange, and finally a bright yellow at the strongest flow
-// anywhere in view — an inferno-style heat ramp. A handful of stops linearly
-// interpolated per point is indistinguishable from a true smooth gradient at
-// this line thickness, for a fraction of the cost. Two variants: the panel
-// background flips between near-black and near-white with the app's own
-// light/dark toggle, and pure black-on-black or pale-yellow-on-white would
-// both disappear, so the two ends of the ramp are nudged to stay visible
-// against whichever background is live; the purple/magenta/orange middle
-// (already mid-luminance) is shared.
-const FLOW_RAMP_DARK = [
-  [0.00, 36,  32,  40 ],   // dim charcoal — reads as "black" but stays visible on the dark panel
-  [0.16, 58,  16,  84 ],   // dark purple
-  [0.34, 118, 30,  120],   // purple
-  [0.52, 190, 56,  96 ],   // lighter purple turning toward red/orange
-  [0.68, 228, 92,  36 ],   // orange
-  [0.84, 248, 162, 24],   // amber (intermediate step toward yellow)
-  [1.00, 255, 234, 20 ],   // bright yellow
-];
-const FLOW_RAMP_LIGHT = [
-  [0.00, 20,  17,  22 ],   // near-black — reads clearly on the light panel
-  [0.16, 55,  16,  80 ],   // dark purple
-  [0.34, 112, 28,  116],   // purple
-  [0.52, 178, 48,  86 ],   // lighter purple turning toward red/orange
-  [0.68, 206, 84,  24 ],   // orange
-  [0.84, 210, 132, 10],   // amber
-  [1.00, 216, 160, 0  ],   // deep gold — a pale yellow would wash out on a light background
-];
-const currentFlowRamp = ()=> document.body.dataset.theme==='light' ? FLOW_RAMP_LIGHT : FLOW_RAMP_DARK;
-function flowRampColor(t, ramp){
-  t=clamp(t,0,1);
-  let i=0;
-  while(i<ramp.length-2 && t>ramp[i+1][0]) i++;
-  const [t0,r0,g0,b0]=ramp[i], [t1,r1,g1,b1]=ramp[i+1];
-  const f=(t1>t0)?(t-t0)/(t1-t0):0;
-  return `rgb(${Math.round(r0+(r1-r0)*f)},${Math.round(g0+(g1-g0)*f)},${Math.round(b0+(b1-b0)*f)})`;
-}
+// Flow lines are drawn in one fixed, fully-opaque near-black (--flow — same
+// hex in both themes) — no colour or opacity coding by local flow strength.
+// Only WIDTH still varies with local speed (see drawFlowStreamline).
+const flowColor = ()=> cvar('--flow');
 
 
 // fills one solid-colour ribbon segment through screen-space points
@@ -1363,24 +1323,20 @@ function fillRibbonRun(ctx, pts){
   ctx.fill();
 }
 
-// draws one streamline as a sequence of colour/width "runs": at every point
-// the LOCAL interpolated flow speed (carried on the point since
-// buildStreamlines — not one magnitude for the whole line) sets both the
-// ribbon's half-width (thin where flow is weak, up to FLOW_MAX_WIDTH where
-// it's strongest) and a bucket along FLOW_RAMP. Consecutive points that land
-// in the same bucket are merged into a single fillRibbonRun() call, so a
-// fairly uniform stretch of flow costs one fill — only where the local speed
-// actually crosses into a new bucket does the line get an extra seam — while
-// width still varies continuously point-by-point within a run. Direction
-// arrowheads are dropped along the line at a roughly fixed screen-space
-// spacing (see the arrowhead block below), so every visible stretch of flow —
-// each branch and each merged tributary is its own line here — carries clear
-// direction cues.
+// draws one streamline as a single filled ribbon: at every point the LOCAL
+// interpolated flow speed (carried on the point since buildStreamlines — not
+// one magnitude for the whole line) sets the ribbon's half-width, thin where
+// flow is weak and up to FLOW_MAX_WIDTH where it's strongest; colour/opacity
+// are fixed (see flowColor()), so the whole ribbon is one fillRibbonRun()
+// call. Direction arrowheads are dropped along the line at a roughly fixed
+// screen-space spacing (see the arrowhead block below), so every visible
+// stretch of flow — each branch and each merged tributary is its own line
+// here — carries clear direction cues.
 const ARROW_SPACING = 120;  // px of screen length between successive arrowheads on a line
 const ARROW_SIZE = 1.55;    // size multiplier vs the earlier single-arrowhead look
 
 // one filled direction chevron on the local tangent at smoothed point i
-function drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch){
+function drawFlowArrow(ctx, pts, wArr, i){
   const n=pts.length; i=Math.min(n-2, Math.max(1, i));
   const a=pts[i-1], b=pts[i+1], p=pts[i];
   let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
@@ -1395,36 +1351,26 @@ function drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch){
   ctx.lineTo(tipX, tipY);
   ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
   ctx.closePath();
-  ctx.fillStyle=flowRampColor(cArr[i], ramp);
-  ctx.globalAlpha=lerp(0.62,1,cArr[i])*(isBranch?0.85:1);
+  ctx.fillStyle=flowColor();
+  ctx.globalAlpha=1;
   ctx.fill();
 }
 
-function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
+function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
   const widthScale=(isBranch?0.72:1)*1.0;   // ~2x the earlier flow-line thickness
   // p[3] = accumulated flow (1 for a line no other line merged into, higher on
-  // a trunk downstream of one or more junctions). sqrt keeps the widening/
-  // brightening sub-linear and capped so a heavily-merged trunk reads as one
-  // bold channel without swamping the map.
+  // a trunk downstream of one or more junctions). sqrt keeps the widening
+  // sub-linear and capped so a heavily-merged trunk reads as one bold channel
+  // without swamping the map. Width is the only thing that still varies with
+  // local flow strength — colour/opacity are fixed (see flowColor()).
   const accW=pts.map(p=>Math.min(FLOW_MERGE_MAX_WIDEN, Math.sqrt(Math.max(1, p[3]||1))));
   const tArr=pts.map(p=>clamp(p[2]/maxMag,0,1));
-  const cArr=pts.map((p,i)=>clamp(tArr[i]*(1+0.16*(accW[i]-1)),0,1));   // colour/alpha run hotter where merged
   const wArr=tArr.map((t,i)=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale*accW[i]);
-  const lvlArr=cArr.map(t=>Math.min(FLOW_COLOR_LEVELS-1, Math.floor(t*FLOW_COLOR_LEVELS)));
-  let runStart=0;
-  for(let i=1;i<n;i++){
-    if(lvlArr[i]!==lvlArr[runStart] || i===n-1){
-      const runPts=[];
-      for(let k=runStart;k<=i;k++) runPts.push([pts[k][0],pts[k][1],wArr[k]]);
-      const avgT=(cArr[runStart]+cArr[i])/2;
-      ctx.fillStyle=flowRampColor(avgT, ramp);
-      ctx.globalAlpha=lerp(0.32,0.95,avgT)*(isBranch?0.78:1);
-      fillRibbonRun(ctx, runPts);
-      runStart=i;   // next run starts at this shared boundary point — no gap
-    }
-  }
+  ctx.fillStyle=flowColor();
+  ctx.globalAlpha=1;
+  fillRibbonRun(ctx, pts.map((p,i)=>[p[0],p[1],wArr[i]]));
   // arrowheads along the line at a fixed screen-space spacing. Cumulative
   // screen length is walked once; a chevron is dropped every ARROW_SPACING px.
   // A branch also gets one just past its start so the fork's new direction is
@@ -1441,7 +1387,7 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, seed, ramp){
   for(const d of targets){
     if(d-lastD < ARROW_SPACING*0.55) continue;
     let i=1; while(i<n-1 && cum[i]<d) i++;
-    drawFlowArrow(ctx, pts, wArr, cArr, i, ramp, isBranch);
+    drawFlowArrow(ctx, pts, wArr, i);
     lastD=d;
   }
 }
@@ -1450,7 +1396,6 @@ function renderFlowFieldStreamlines(cache){
   const ctx=$('flowCanvas').getContext('2d');
   ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
   const maxMag=cache.magRef || Math.max(1e-6, ...cache.rawMag);
-  const ramp=currentFlowRamp();
   // thinner ceiling when zoomed all the way out (see TU_LOD_ZOOM) — recomputed
   // every call, including mid-gesture reprojection, so width tracks zoom
   // smoothly even though the underlying streamlines only retrace on settle
@@ -1460,7 +1405,7 @@ function renderFlowFieldStreamlines(cache){
     const screenPts=line.pts.map(([x,y,m],i)=>{ const p=_tu.map(x,y); return [p[0],p[1],m, acc?acc[i]:1]; });
     if(screenPts.length<2) return;
     const isBranch = line.seed % 1 !== 0;
-    drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch, line.seed, ramp);
+    drawFlowStreamline(ctx, screenPts, maxMag, baseW, isBranch);
   });
   ctx.globalAlpha=1;
 }
@@ -1650,7 +1595,7 @@ function renderAbxGutter(){
 // --------------------------------------------------------------------- //
 //  editing interactions
 // --------------------------------------------------------------------- //
-let drag=null, readoutDrag=null, tuDrag=false;
+let drag=null, readoutDrag=null, tuDrag=false, tuPanDrag=null;
 function refreshReadoutViews(){ renderComposition(); renderObserved(); renderTaxumap(); renderAbx(); }
 
 // Fast path for a readout-cursor drag. The stacked composition chart, the
@@ -1689,13 +1634,19 @@ function setupPointer(){   // attached ONCE from init()
   });
   // taxUMAP: grab the readout dot and slide it along the predicted path —
   // the trajectory itself is unchanged, only the readout day (and hence the
-  // dot's position along the path) moves forward/back as you drag
+  // dot's position along the path) moves forward/back as you drag. A
+  // pointerdown anywhere else on the map instead click-and-hold pans it (the
+  // same S.tuPan the wheel/two-finger-swipe path already drives — see
+  // setupTaxumapZoom), so panning doesn't require zooming in/out first.
   $('taxumapSvg').addEventListener('pointerdown',(ev)=>{
-    if(!S.fc || !_tu || !_tu.pts || !_tu.dotPos) return;
+    if(!S.fc || !_tu) return;
     const [x,y]=localXY(ev,$('taxumapSvg'));
-    if(Math.hypot(x-_tu.dotPos[0], y-_tu.dotPos[1])<14){
+    if(_tu.pts && _tu.dotPos && Math.hypot(x-_tu.dotPos[0], y-_tu.dotPos[1])<14){
       tuDrag=true; document.body.classList.add('tu-dragging'); ev.preventDefault();
+      return;
     }
+    tuPanDrag={x0:ev.clientX, y0:ev.clientY, panX0:S.tuPan.x, panY0:S.tuPan.y};
+    document.body.classList.add('tu-dragging'); ev.preventDefault();
   });
   const abx=$('abxSvg');
   abx.addEventListener('pointerdown',(ev)=>{
@@ -1714,6 +1665,13 @@ function setupPointer(){   // attached ONCE from init()
       if(idx!=null){ S.readoutDay=_tu.days[idx]; moveReadoutCursor(); }
       return;
     }
+    if(tuPanDrag){
+      S.tuPan.x = tuPanDrag.panX0 + (ev.clientX - tuPanDrag.x0);
+      S.tuPan.y = tuPanDrag.panY0 + (ev.clientY - tuPanDrag.y0);
+      clampTuPan();
+      scheduleTuGestureRedraw($('flowCanvas'));
+      return;
+    }
     if(readoutDrag){
       S.readoutDay=clamp(Math.round(dayFromX(localX(ev,readoutDrag))), S.t0, S.t0+S.horizon);
       moveReadoutCursor(); return;
@@ -1727,6 +1685,7 @@ function setupPointer(){   // attached ONCE from init()
   window.addEventListener('pointerup',()=>{
     readoutDrag=null;
     if(tuDrag){ tuDrag=false; document.body.classList.remove('tu-dragging'); }
+    if(tuPanDrag){ tuPanDrag=null; document.body.classList.remove('tu-dragging'); }
     if(drag){
       const moved=Math.abs(drag.cur-drag.start);
       if(moved<0.75) removeBarAt(drag.cat, drag.start);
