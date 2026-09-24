@@ -657,6 +657,13 @@ function setupTaxumapMap(w,h){
     const bx=offx+(x-xmin)*s, by=h-(offy+(y-ymin)*s);         // zoom=1 baseline (invert y for screen)
     return [S.tuPan.x+bx*S.tuZoom, S.tuPan.y+by*S.tuZoom];
   };
+  // inverse of map(): screen (sx,sy) -> data-space (x,y) — used to find which
+  // part of the reference map is actually in view (see activeFineTileTargets),
+  // never for the dot/path/backdrop which only ever go data->screen
+  const unmap=(sx,sy)=>{
+    const bx=(sx-S.tuPan.x)/S.tuZoom, by=(sy-S.tuPan.y)/S.tuZoom;
+    return [xmin+(bx-offx)/s, ymin+(h-offy-by)/s];
+  };
   const dpr=Math.min(window.devicePixelRatio||1, 2);
   const cv=$('taxumapCanvas'); cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr);
   cv.style.width=w+'px'; cv.style.height=h+'px';
@@ -665,7 +672,7 @@ function setupTaxumapMap(w,h){
   const svg=$('taxumapSvg'); svg.setAttribute('viewBox',`0 0 ${w} ${h}`); svg.innerHTML='';
   svg.appendChild(el('text',{x:w-8,y:h-7,'text-anchor':'end',fill:cvar('--muted'),'font-size':10},[txt('TaxUMAP-1 →')]));
   svg.appendChild(el('text',{x:11,y:15,fill:cvar('--muted'),'font-size':10},[txt('↑ TaxUMAP-2')]));
-  _tu={w,h,dpr,map,fc:null};
+  _tu={w,h,dpr,map,unmap,fc:null};
 }
 
 // keep the pan within reach of the actual data: a positive pan.x always
@@ -1100,6 +1107,213 @@ function flowChunkStep(){
   }
 }
 
+// --------------------------------------------------------------------- //
+//  flow field — FINE-DETAIL level-of-detail layer
+// --------------------------------------------------------------------- //
+//  The coarse field above (FLOW_GRID=30 seeds over the FULL map, computed
+//  once per perturbation set) is what's always on screen and NEVER retraces
+//  from zoom/pan — that stability is deliberate, so the big streamlines don't
+//  look like they're "moving on a whim" while scrolling.
+//  This second, independent layer adds finer in-between detail that only
+//  shows up once the user has zoomed in a bit, fading in continuously with
+//  zoom level (never a hard pop) and fading back out on zoom-out — never
+//  disturbing the coarse layer underneath, which keeps rendering exactly as
+//  before regardless of whether this layer is on screen.
+//  To keep this cheap, fine streamlines are only ever traced for the part of
+//  the reference map actually near the viewport, computed in fixed TILES (the
+//  full map cut into a FLOW_FINE_TILE_DIV x FLOW_FINE_TILE_DIV grid) so a
+//  small pan/zoom tweak reuses already-traced tiles instead of retracing —
+//  each tile is computed once (chunked across frames, same time-budget
+//  trick as the coarse field) and then cached for the rest of the session
+//  (per perturbation set), so panning back over ground already seen is
+//  instant, and only genuinely new territory costs anything.
+// Measured empirically: at this map's fit-to-bounds transform, the viewport
+// spans roughly (1.94 / S.tuZoom) of the full data-space width — so the zoom
+// thresholds below are picked to keep the viewport (+ margin) meaningfully
+// smaller than the full map by the time any fine-tile compute is triggered,
+// not "practically everything," which is what a naively-low threshold gave.
+const FLOW_FINE_ZOOM_MIN = 4.5;   // fine layer starts fading in above this zoom (viewport ≈43% of map width)
+const FLOW_FINE_ZOOM_FULL = 9;    // fully faded in (opacity 1) by this zoom (viewport ≈22% of map width)
+const FLOW_FINE_TILE_DIV = 6;     // the full map is cut into DIV x DIV tiles
+const FLOW_FINE_VIEW_MARGIN_FRAC = 0.2; // "adjacent" margin added around the viewport, as a fraction of the
+                                         // viewport's OWN span — scales down with zoom instead of a fixed tile count
+const FLOW_FINE_GRID_PER_TILE = 10;  // seed-candidate grid resolution WITHIN one tile
+const FLOW_FINE_STREAM_SEEDS = 9;    // short streamlines traced per tile
+const FLOW_FINE_STREAM_STEPS = 8;    // integration steps per fine streamline (shorter — tiles are small)
+const FLOW_FINE_TILE_CACHE_MAX = 40; // cap on cached tiles across all perturbation sets (LRU-evicted)
+const FLOW_FINE_CHUNK_BUDGET_MS = 8; // per-frame time budget for tracing one tile, same idea as FLOW_CHUNK_BUDGET_MS
+
+let _fineTiles=new Map();   // "perturbKey|tx|ty" -> {vectors,dirs,streamlines,rawMag,magRef}
+let _fineOrder=[];          // LRU order (oldest first) of the keys above, for eviction
+let _finePending=null;      // {tileKey, idxs, i, vectors, N, schedule, info, tileBounds} — one tile at a time
+
+function tileIndexOf(info, x, y){
+  const [xmin,xmax,ymin,ymax]=info.bounds;
+  const tw=(xmax-xmin)/FLOW_FINE_TILE_DIV, th=(ymax-ymin)/FLOW_FINE_TILE_DIV;
+  return [
+    clamp(Math.floor((x-xmin)/(tw||1)), 0, FLOW_FINE_TILE_DIV-1),
+    clamp(Math.floor((y-ymin)/(th||1)), 0, FLOW_FINE_TILE_DIV-1),
+  ];
+}
+function tileBoundsOf(info, tx, ty){
+  const [xmin,xmax,ymin,ymax]=info.bounds;
+  const tw=(xmax-xmin)/FLOW_FINE_TILE_DIV, th=(ymax-ymin)/FLOW_FINE_TILE_DIV;
+  return [xmin+tx*tw, xmin+(tx+1)*tw, ymin+ty*th, ymin+(ty+1)*th];
+}
+
+// which tiles are "the user's field of view and adjacent": the data-space
+// box spanned by the four viewport corners (via _tu.unmap), padded by
+// FLOW_FINE_VIEW_MARGIN_FRAC of the viewport's OWN size — so the margin
+// shrinks along with the viewport as the user zooms in, rather than a fixed
+// tile count (which, at this map's fairly wide fit-to-bounds viewport, would
+// balloon to nearly the whole map right at the fade-in threshold). Panning by
+// less than that margin never shows a gap — the neighbours are already
+// cached/computing before they're needed.
+function activeFineTileTargets(perturbKey){
+  const info=TAXUMAP.info();
+  const corners=[[0,0],[_tu.w,0],[0,_tu.h],[_tu.w,_tu.h]];
+  let xMin=Infinity,xMax=-Infinity,yMin=Infinity,yMax=-Infinity;
+  for(const [sx,sy] of corners){
+    const [dx,dy]=_tu.unmap(sx,sy);
+    if(dx<xMin)xMin=dx; if(dx>xMax)xMax=dx; if(dy<yMin)yMin=dy; if(dy>yMax)yMax=dy;
+  }
+  const mx=(xMax-xMin)*FLOW_FINE_VIEW_MARGIN_FRAC, my=(yMax-yMin)*FLOW_FINE_VIEW_MARGIN_FRAC;
+  const [txMin,tyMin]=tileIndexOf(info, xMin-mx, yMin-my);
+  const [txMax,tyMax]=tileIndexOf(info, xMax+mx, yMax+my);
+  const out=[];
+  for(let tx=txMin;tx<=txMax;tx++) for(let ty=tyMin;ty<=tyMax;ty++) out.push({tx,ty,key:perturbKey+'|'+tx+'|'+ty});
+  return out;
+}
+
+// one reference point per fine grid-cell, restricted to this ONE tile —
+// scans all reference points (same O(nRef) cost as pickFlowSamplePoints) but
+// only accepts ones that actually land inside the tile, so the seed count
+// stays bounded by the tile's own area/density, not the whole map.
+function pickFineSeedPoints(info, tx, ty){
+  const [txmin,txmax,tymin,tymax]=tileBoundsOf(info, tx, ty);
+  const cellW=(txmax-txmin)/FLOW_FINE_GRID_PER_TILE||1, cellH=(tymax-tymin)/FLOW_FINE_GRID_PER_TILE||1;
+  const chosen=new Map();
+  for(let r=0;r<info.nRef;r++){
+    const x=info.knnCoords[2*r], y=info.knnCoords[2*r+1];
+    if(x<txmin||x>=txmax||y<tymin||y>=tymax) continue;
+    const cx=clamp(Math.floor((x-txmin)/cellW),0,FLOW_FINE_GRID_PER_TILE-1);
+    const cy=clamp(Math.floor((y-tymin)/cellH),0,FLOW_FINE_GRID_PER_TILE-1);
+    const key=cx*FLOW_FINE_GRID_PER_TILE+cy;
+    if(!chosen.has(key)) chosen.set(key,r);
+  }
+  return [...chosen.values()];
+}
+
+// short, unmerged, unbranched streamlines confined to one tile — deliberately
+// simpler than buildStreamlines() (no junction-merging, no forking): these
+// are meant to read as fine connective in-between detail, not as bold
+// channels competing with the coarse field for attention.
+function buildFineStreamlines(vectors, dirs, mags, tileBounds){
+  if(!vectors.length) return [];
+  const [xmin,xmax,ymin,ymax]=tileBounds;
+  const L=Math.max(xmax-xmin, ymax-ymin)||1;
+  const sigma=(L/FLOW_FINE_GRID_PER_TILE)*1.4, sigma2=sigma*sigma, stepData=sigma*0.5;
+  const stride=Math.max(1, Math.ceil(vectors.length/FLOW_FINE_STREAM_SEEDS));
+  const lines=[];
+  for(let i=0;i<vectors.length;i+=stride){
+    let x=vectors[i][0], y=vectors[i][1];
+    const pts=[[x,y,mags[i]]];
+    for(let s=0;s<FLOW_FINE_STREAM_STEPS;s++){
+      const f=sampleFlowField(vectors,dirs,mags,sigma2,x,y); if(!f) break;
+      x+=f.dir[0]*stepData; y+=f.dir[1]*stepData;
+      pts.push([x,y,f.mag]);
+    }
+    if(pts.length>1) lines.push({pts, acc:new Float64Array(pts.length).fill(1)});
+  }
+  return lines;
+}
+
+function touchFineTile(key){
+  const i=_fineOrder.indexOf(key);
+  if(i>=0) _fineOrder.splice(i,1);
+  _fineOrder.push(key);
+}
+function cacheFineTile(key, data){
+  _fineTiles.set(key, data);
+  touchFineTile(key);
+  while(_fineOrder.length>FLOW_FINE_TILE_CACHE_MAX){
+    const evict=_fineOrder.shift();
+    if(evict!==key) _fineTiles.delete(evict);
+  }
+}
+
+function startFineTileCompute(tileKey, tx, ty){
+  if(_finePending || _fineTiles.has(tileKey)) return;   // one in flight at a time; already-cached tiles are free
+  const N = S.fc && S.fc.fullComp && S.fc.fullComp[0] ? S.fc.fullComp[0].length : null;
+  if(!N) return;
+  const info=TAXUMAP.info();
+  const idxs=pickFineSeedPoints(info, tx, ty);
+  const schedule=activePerturbationSchedule();
+  _finePending={tileKey, idxs, i:0, vectors:[], N, schedule, info, tileBounds:tileBoundsOf(info,tx,ty)};
+  requestAnimationFrame(fineTileChunkStep);
+}
+
+function fineTileChunkStep(){
+  const p=_finePending; if(!p) return;
+  const t0=performance.now();
+  while(p.i<p.idxs.length && performance.now()-t0<FLOW_FINE_CHUNK_BUDGET_MS){
+    const r=p.idxs[p.i++];
+    const x0=new Float64Array(p.N);
+    for(let g=p.info.gptr[r]; g<p.info.gptr[r+1]; g++) x0[p.info.genI[g]]=p.info.gVal[g];
+    let fc;
+    try{ fc=window.__tipnodeForecast(x0,0,FLOW_DT,p.schedule); }
+    catch(e){ continue; }
+    const comp2=fc.fullComp[fc.fullComp.length-1];
+    const p1=TAXUMAP.project(comp2);
+    if(!p1) continue;
+    const x0d=p.info.knnCoords[2*r], y0d=p.info.knnCoords[2*r+1];
+    const rawDx=p1[0]-x0d, rawDy=p1[1]-y0d;
+    if(Math.hypot(rawDx,rawDy)<FLOW_MIN_DRIFT) continue;
+    p.vectors.push([x0d,y0d,x0d+rawDx/FLOW_DT,y0d+rawDy/FLOW_DT]);
+  }
+  if(p.i<p.idxs.length){
+    requestAnimationFrame(fineTileChunkStep);
+    return;
+  }
+  const dirs=smoothFlowDirections(p.vectors);
+  const rawMag=p.vectors.map(([x0,y0,x1,y1])=>Math.hypot(x1-x0,y1-y0));
+  const sortedMag=rawMag.slice().sort((a,b)=>a-b);
+  const magRef=sortedMag.length ? Math.max(1e-6, sortedMag[clamp(Math.floor(sortedMag.length*0.85),0,sortedMag.length-1)]) : 1e-6;
+  const streamlines=buildFineStreamlines(p.vectors, dirs, rawMag, p.tileBounds);
+  cacheFineTile(p.tileKey, {vectors:p.vectors, dirs, streamlines, rawMag, magRef});
+  _finePending=null;
+  // re-render so this tile appears (already at whatever the current zoom's
+  // fade level is), and so the next still-missing neighbour tile (if any)
+  // gets picked up and starts computing in turn
+  if(S.flowOn && tuPanelActive()) drawFlowField(true);
+}
+
+// draws the fine-detail infill layer on top of the coarse field: nothing at
+// all below FLOW_FINE_ZOOM_MIN (skips the viewport/tile bookkeeping too, so
+// zoomed-out viewing costs nothing extra), then a continuous zoom-driven
+// opacity ramp up to FLOW_FINE_ZOOM_FULL. Missing tiles in view start
+// computing in the background (see startFineTileCompute); already-cached
+// ones just draw, cheaply, every frame including mid-gesture.
+function renderFineFlowLayer(perturbKey){
+  const fadeT=clamp((S.tuZoom-FLOW_FINE_ZOOM_MIN)/(FLOW_FINE_ZOOM_FULL-FLOW_FINE_ZOOM_MIN), 0, 1);
+  if(fadeT<=0 || !S.fc || !_tu) return;
+  const ctx=$('flowCanvas').getContext('2d');
+  ctx.setTransform(_tu.dpr,0,0,_tu.dpr,0,0);
+  const baseW=lerp(FLOW_MAX_WIDTH*0.36, FLOW_MAX_WIDTH, tuLod())*0.55;   // reads a touch thinner than the coarse channels
+  activeFineTileTargets(perturbKey).forEach(t=>{
+    const tile=_fineTiles.get(t.key);
+    if(!tile){ startFineTileCompute(t.key, t.tx, t.ty); return; }
+    touchFineTile(t.key);
+    const maxMag=tile.magRef || Math.max(1e-6, ...tile.rawMag);
+    tile.streamlines.forEach(line=>{
+      const screenPts=line.pts.map(([x,y,m])=>{ const p=_tu.map(x,y); return [p[0],p[1],m,1]; });
+      if(screenPts.length<2) return;
+      drawFlowStreamline(ctx, screenPts, maxMag, baseW, false, fadeT);
+    });
+  });
+  ctx.globalAlpha=1;
+}
+
 // spatially smooth each vector's direction against its neighbours (inverse-
 // distance weighted) so the field reads as one continuous flow rather than
 // independent arrows — this is the "averaging" that gives streamlines their
@@ -1337,7 +1551,7 @@ const ARROW_SPACING = 120;  // px of screen length between successive arrowheads
 const ARROW_SIZE = 1.55;    // size multiplier vs the earlier single-arrowhead look
 
 // one filled direction chevron on the local tangent at smoothed point i
-function drawFlowArrow(ctx, pts, wArr, i){
+function drawFlowArrow(ctx, pts, wArr, i, alpha){
   const n=pts.length; i=Math.min(n-2, Math.max(1, i));
   const a=pts[i-1], b=pts[i+1], p=pts[i];
   let tx=b[0]-a[0], ty=b[1]-a[1]; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
@@ -1353,11 +1567,15 @@ function drawFlowArrow(ctx, pts, wArr, i){
   ctx.lineTo(backX-nx*flareW, backY-ny*flareW);
   ctx.closePath();
   ctx.fillStyle=flowColor();
-  ctx.globalAlpha=1;
+  ctx.globalAlpha=alpha;
   ctx.fill();
 }
 
-function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch){
+// `alpha` (default 1 — fully opaque, per the fixed single-colour flow-line
+// rule) lets the fine-detail LOD layer fade in/out with zoom while the main
+// coarse field — drawn through the default — always stays fully opaque and
+// never varies. See renderFineFlowLayer.
+function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch, alpha=1){
   const pts=smoothPolyline(rawPts, 4);
   const n=pts.length; if(n<2) return;
   const widthScale=(isBranch?0.72:1)*1.0;   // ~2x the earlier flow-line thickness
@@ -1365,12 +1583,13 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch){
   // a trunk downstream of one or more junctions). sqrt keeps the widening
   // sub-linear and capped so a heavily-merged trunk reads as one bold channel
   // without swamping the map. Width is the only thing that still varies with
-  // local flow strength — colour/opacity are fixed (see flowColor()).
+  // local flow strength — colour is fixed (see flowColor()); opacity is fixed
+  // per-line at whatever `alpha` this call was given.
   const accW=pts.map(p=>Math.min(FLOW_MERGE_MAX_WIDEN, Math.sqrt(Math.max(1, p[3]||1))));
   const tArr=pts.map(p=>clamp(p[2]/maxMag,0,1));
   const wArr=tArr.map((t,i)=>baseW*lerp(FLOW_MIN_WIDTH_FRAC,1,t)*widthScale*accW[i]);
   ctx.fillStyle=flowColor();
-  ctx.globalAlpha=1;
+  ctx.globalAlpha=alpha;
   fillRibbonRun(ctx, pts.map((p,i)=>[p[0],p[1],wArr[i]]));
   // arrowheads along the line at a fixed screen-space spacing. Cumulative
   // screen length is walked once; a chevron is dropped every ARROW_SPACING px.
@@ -1388,7 +1607,7 @@ function drawFlowStreamline(ctx, rawPts, maxMag, baseW, isBranch){
   for(const d of targets){
     if(d-lastD < ARROW_SPACING*0.55) continue;
     let i=1; while(i<n-1 && cum[i]<d) i++;
-    drawFlowArrow(ctx, pts, wArr, i);
+    drawFlowArrow(ctx, pts, wArr, i, alpha);
     lastD=d;
   }
 }
@@ -1425,10 +1644,14 @@ function renderFlowFieldStreamlines(cache){
 function drawFlowField(fromCache){
   clearFlowCanvas();
   if(!S.flowOn || !_tu) return;
-  if(fromCache && _flowCache.vectors){ renderFlowFieldStreamlines(_flowCache); return; }
   const key = Object.keys(S.perturbations).filter(c=>S.perturbations[c]).sort().join(',');
-  if(_flowCache.key!==key || !_flowCache.vectors) startFlowFieldRecompute(key);
-  if(_flowCache.vectors) renderFlowFieldStreamlines(_flowCache);   // last-known field, even if stale
+  if(fromCache && _flowCache.vectors){
+    renderFlowFieldStreamlines(_flowCache);
+  } else {
+    if(_flowCache.key!==key || !_flowCache.vectors) startFlowFieldRecompute(key);
+    if(_flowCache.vectors) renderFlowFieldStreamlines(_flowCache);   // last-known field, even if stale
+  }
+  renderFineFlowLayer(key);   // zoom-gated fine-detail infill — see its own doc comment
 }
 
 // current antibiotic classes active in S.schedule at day `day` (interval-membership test)
@@ -1919,15 +2142,24 @@ function setupTutorial(){
   });
 }
 
-// tiny faint "deployed commit" tag, top-right. A file committed to git can't
-// contain its own commit hash, so resolve it live from GitHub — this always
-// reflects whatever's actually on main. Silently stays blank if offline / rate
-// limited.
-(function showCommitTag(){
-  const el=$('commitTag'); if(!el) return;
+// "deployed commit" — dev-only diagnostic, no longer shown on the page itself
+// (a small on-screen tag was distracting for regular visitors). A file
+// committed to git can't contain its own commit hash, so it's still resolved
+// live from GitHub — this always reflects whatever's actually on main — but
+// now it's only surfaced to the console (and window.__commitSha, for scripts/
+// screenshots) so it's still one glance away in devtools for a developer
+// pulling the page up, without cluttering the UI. Silently stays unset if
+// offline / rate limited.
+(function logCommitTag(){
   fetch('https://api.github.com/repos/aeriab/pNODE_explorer/commits/main')
     .then(r=> r.ok ? r.json() : null)
-    .then(j=>{ if(j && j.sha) el.textContent=j.sha.slice(0,7); })
+    .then(j=>{
+      if(!j || !j.sha) return;
+      const sha=j.sha.slice(0,7);
+      window.__commitSha=sha;
+      console.log('%cpNODE Explorer%c deployed commit: %c'+sha,
+        'font-weight:700', 'font-weight:400', 'font-family:monospace;font-weight:700');
+    })
     .catch(()=>{});
 })();
 
