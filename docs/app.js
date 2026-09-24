@@ -486,8 +486,8 @@ function drawPredicted(g, y){
     const upper=cum.map((c,i)=>c+vals[ti][i]);
     let d='M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(cum[i]).toFixed(1)}`).join('L');
     d+='L'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(upper[i]).toFixed(1)}`).reverse().join('L')+'Z';
-    g.appendChild(el('path',{d, fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'),
-      'stroke-width':0.6, 'shape-rendering':'geometricPrecision', 'data-taxa':taxa[ti], 'data-idx':ti}));
+    g.appendChild(el('path',{d, fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'), 'stroke-opacity':0.7,
+      'stroke-width':0.45, 'shape-rendering':'geometricPrecision', 'data-taxa':taxa[ti], 'data-idx':ti}));
     cum=upper;
   }
   if(S.baseFc){
@@ -549,7 +549,7 @@ function drawObservedBars(g, y){
         const yt=y(cum+v), yb=y(cum);
         g.appendChild(el('rect',{x:(xc-barW/2).toFixed(1), y:yt.toFixed(1),
           width:barW.toFixed(1), height:Math.max(yb-yt,0.4).toFixed(1),
-          fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'), 'stroke-width':0.4,
+          fill:taxaColor(taxa[ti]), stroke:cvar('--band-sep'), 'stroke-opacity':0.7, 'stroke-width':0.3,
           'data-taxa':taxa[ti], 'data-idx':ti, 'data-val':v}));
       }
       cum+=v;
@@ -719,25 +719,11 @@ function setupTaxumapZoom(){
   wrap.addEventListener('wheel',(e)=>{
     if(!_tu||!_tuBase) return;
     e.preventDefault(); e.stopPropagation();
-    // Trackpads report two-finger gestures as wheel events too. Browsers mark
-    // an actual pinch with ctrlKey — the same convention used for
-    // ctrl+wheel-to-zoom on a mouse — regardless of whether Ctrl is actually
-    // held, so ctrlKey reliably means "zoom" either way. The remaining
-    // ambiguity is a plain vertical wheel: a two-finger swipe and a classic
-    // mouse wheel are otherwise indistinguishable through this event (both
-    // can report deltaMode 0 depending on OS/browser — a notched "line"
-    // deltaMode can't be relied on). A non-zero deltaX is the one signal a
-    // mouse wheel essentially never produces but a real two-finger swipe
-    // almost always does (natural hand motion is rarely perfectly vertical),
-    // so that's the switch: any horizontal component means pan, everything
-    // else keeps the original scroll-to-zoom behaviour.
-    if(!e.ctrlKey && e.deltaX!==0){
-      S.tuPan.x -= e.deltaX;
-      S.tuPan.y -= e.deltaY;
-      clampTuPan();
-      scheduleTuGestureRedraw(fCanvas);
-      return;
-    }
+    // Wheel/trackpad always zooms now (click-and-hold drag is the only way to
+    // pan — see the taxumapSvg pointerdown handler in setupPointer). A
+    // two-finger trackpad swipe used to pan via its deltaX component; that
+    // path is gone, so a swipe now just zooms on its deltaY like any other
+    // wheel input.
     if(!rectCache) rectCache=wrap.getBoundingClientRect();
     const mx=e.clientX-rectCache.left, my=e.clientY-rectCache.top;
     const oldZoom=S.tuZoom;
@@ -785,6 +771,18 @@ const TU_LOD_ZOOM = 5;
 const tuLod = ()=> clamp((S.tuZoom-1)/(TU_LOD_ZOOM-1), 0, 1);
 const lerp = (a,b,t)=> a+(b-a)*t;
 
+// The reference-cloud dots are painted at partial alpha (see paint() below),
+// so their APPARENT colour is really that alpha blended with whatever's
+// behind the canvas — which used to be the app's own theme background, so
+// the exact same dot RGBs read as a muted dark tone in dark mode and a much
+// paler, washed-out tone in light mode. Rather than have the dots change
+// look with the theme, the canvas is always painted onto this one fixed dark
+// backing (the same hex as dark mode's --surface-1) first, so the blended
+// result is pixel-identical in both themes — "the dots always look like
+// dark mode". The start-of-path marker (renderTaxumapPathSvg) uses the same
+// constant so it keeps reading as a hollow ring against that fixed backing.
+const TU_MAP_BG = '#1a1a19';
+
 let _tuBackdropSnap=null;   // {canvas, zoom, pan}
 function drawTaxumapBackdrop(fromCache){
   const ctx=$('taxumapCanvas').getContext('2d');
@@ -810,6 +808,9 @@ function drawTaxumapBackdrop(fromCache){
     byColor.get(col).push(i);
   }
   const paint=(ctx2)=>{
+    ctx2.globalAlpha=1;
+    ctx2.fillStyle=TU_MAP_BG;
+    ctx2.fillRect(0,0,_tu.w,_tu.h);
     ctx2.globalAlpha=0.32;
     for(const [col,idxs] of byColor){
       ctx2.fillStyle=col; ctx2.beginPath();
@@ -867,8 +868,8 @@ function renderTaxumapPathSvg(){
   if(valid.length>1){
     g.appendChild(el('path',{d:'M'+valid.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('L'),
       fill:'none',stroke:cvar('--accent'),'stroke-width':1.6,'stroke-opacity':0.6,'stroke-linejoin':'round'}));
-    g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:cvar('--surface-1'),
-      stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker
+    g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:TU_MAP_BG,
+      stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker — matches the fixed TU_MAP_BG backing
   }
   // BSI event dots: place each event on the path point nearest its day
   (S.bsiEvents||[]).forEach(ev=>{
