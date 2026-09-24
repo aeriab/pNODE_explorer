@@ -160,7 +160,6 @@ button.sm{padding:5px 9px;font-size:12px}
   cursor:pointer;padding:2px 3px;border-radius:5px;user-select:none}
 .perturb-item:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .perturb-item input{cursor:pointer;accent-color:var(--accent2);margin:0}
-.perturb-swatch{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
 /* the "match administered" row reuses .perturb-item's layout but is visually
    set apart (bold, divider, blue accent) — these rules must come AFTER
    .perturb-item/.perturb-item input above to win the equal-specificity cascade */

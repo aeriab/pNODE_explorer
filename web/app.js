@@ -778,18 +778,6 @@ const TU_LOD_ZOOM = 5;
 const tuLod = ()=> clamp((S.tuZoom-1)/(TU_LOD_ZOOM-1), 0, 1);
 const lerp = (a,b,t)=> a+(b-a)*t;
 
-// The reference-cloud dots are painted at partial alpha (see paint() below),
-// so their APPARENT colour is really that alpha blended with whatever's
-// behind the canvas — which used to be the app's own theme background, so
-// the exact same dot RGBs read as a muted dark tone in dark mode and a much
-// paler, washed-out tone in light mode. Rather than have the dots change
-// look with the theme, the canvas is always painted onto this one fixed dark
-// backing (the same hex as dark mode's --surface-1) first, so the blended
-// result is pixel-identical in both themes — "the dots always look like
-// dark mode". The start-of-path marker (renderTaxumapPathSvg) uses the same
-// constant so it keeps reading as a hollow ring against that fixed backing.
-const TU_MAP_BG = '#1a1a19';
-
 let _tuBackdropSnap=null;   // {canvas, zoom, pan}
 function drawTaxumapBackdrop(fromCache){
   const ctx=$('taxumapCanvas').getContext('2d');
@@ -815,9 +803,6 @@ function drawTaxumapBackdrop(fromCache){
     byColor.get(col).push(i);
   }
   const paint=(ctx2)=>{
-    ctx2.globalAlpha=1;
-    ctx2.fillStyle=TU_MAP_BG;
-    ctx2.fillRect(0,0,_tu.w,_tu.h);
     ctx2.globalAlpha=0.32;
     for(const [col,idxs] of byColor){
       ctx2.fillStyle=col; ctx2.beginPath();
@@ -875,8 +860,8 @@ function renderTaxumapPathSvg(){
   if(valid.length>1){
     g.appendChild(el('path',{d:'M'+valid.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('L'),
       fill:'none',stroke:cvar('--accent'),'stroke-width':1.6,'stroke-opacity':0.6,'stroke-linejoin':'round'}));
-    g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:TU_MAP_BG,
-      stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker — matches the fixed TU_MAP_BG backing
+    g.appendChild(el('circle',{cx:valid[0][0],cy:valid[0][1],r:3.2,fill:cvar('--surface-1'),
+      stroke:cvar('--ink2'),'stroke-width':1.3}));   // start (sample) marker
   }
   // BSI event dots: place each event on the path point nearest its day
   (S.bsiEvents||[]).forEach(ev=>{
@@ -1132,15 +1117,18 @@ function flowChunkStep(){
 // thresholds below are picked to keep the viewport (+ margin) meaningfully
 // smaller than the full map by the time any fine-tile compute is triggered,
 // not "practically everything," which is what a naively-low threshold gave.
-const FLOW_FINE_ZOOM_MIN = 4.5;   // fine layer starts fading in above this zoom (viewport ≈43% of map width)
-const FLOW_FINE_ZOOM_FULL = 9;    // fully faded in (opacity 1) by this zoom (viewport ≈22% of map width)
+const FLOW_FINE_ZOOM_MIN = 3.6;   // fine layer starts fading in above this zoom (viewport ≈54% of map width)
+const FLOW_FINE_ZOOM_FULL = 7.0;  // fully faded in (opacity 1) by this zoom (viewport ≈28% of map width)
 const FLOW_FINE_TILE_DIV = 6;     // the full map is cut into DIV x DIV tiles
-const FLOW_FINE_VIEW_MARGIN_FRAC = 0.2; // "adjacent" margin added around the viewport, as a fraction of the
-                                         // viewport's OWN span — scales down with zoom instead of a fixed tile count
+const FLOW_FINE_VIEW_MARGIN_FRAC = 0.15; // "adjacent" margin added around the viewport, as a fraction of the
+                                          // viewport's OWN span — scales down with zoom instead of a fixed tile count;
+                                          // trimmed a bit from 0.2 to help offset the lower zoom thresholds above
 const FLOW_FINE_GRID_PER_TILE = 10;  // seed-candidate grid resolution WITHIN one tile
-const FLOW_FINE_STREAM_SEEDS = 9;    // short streamlines traced per tile
+const FLOW_FINE_STREAM_SEEDS = 13;   // short streamlines traced per tile — more of them read as denser fine
+                                      // detail; cheap to raise since it only reuses already-computed vectors,
+                                      // no extra model calls
 const FLOW_FINE_STREAM_STEPS = 8;    // integration steps per fine streamline (shorter — tiles are small)
-const FLOW_FINE_TILE_CACHE_MAX = 40; // cap on cached tiles across all perturbation sets (LRU-evicted)
+const FLOW_FINE_TILE_CACHE_MAX = 50; // cap on cached tiles across all perturbation sets (LRU-evicted)
 const FLOW_FINE_CHUNK_BUDGET_MS = 8; // per-frame time budget for tracing one tile, same idea as FLOW_CHUNK_BUDGET_MS
 
 let _fineTiles=new Map();   // "perturbKey|tx|ty" -> {vectors,dirs,streamlines,rawMag,magRef}
@@ -1690,7 +1678,7 @@ function buildPerturbList(){
   cats.forEach(cat=>{
     S.perturbations[cat]=false;
     const lab=document.createElement('label'); lab.className='perturb-item';
-    lab.innerHTML=`<input type="checkbox" data-cat="${cat}"><span class="perturb-swatch" style="background:${cvar('--flow')}"></span>${abxLabel(cat)}`;
+    lab.innerHTML=`<input type="checkbox" data-cat="${cat}">${abxLabel(cat)}`;
     lab.querySelector('input').addEventListener('change',(e)=>{
       // reflect the checkbox instantly; defer the (expensive) recompute one
       // tick so the browser paints the toggle before the heavy work runs
