@@ -1124,9 +1124,9 @@ function flowChunkStep(){
 // Measured empirically: at this map's fit-to-bounds transform, the viewport
 // spans roughly (1.94 / S.tuZoom) of the full data-space width.
 const FLOW_FINE_LEVELS = [       // 3 waves of increasing density; each is its own fade-in zoom range
-  {min:2.6, full:4.0},   // level 0 — sparsest, appears soonest
-  {min:4.0, full:5.6},   // level 1 — fills in to 2x the level-0 density
-  {min:5.6, full:7.5},   // level 2 — fills in to full density
+  {min:3.6, full:5.2},   // level 0 — sparsest, appears soonest
+  {min:5.6, full:7.6},   // level 1 — fills in to 2x the level-0 linear density
+  {min:8.2, full:10.5},  // level 2 — checkerboard fill-in (half the full grid, kept sparse on purpose)
 ];
 const FLOW_FINE_TILE_DIV = 6;     // the full map is cut into DIV x DIV tiles
 const FLOW_FINE_VIEW_MARGIN_FRAC = 0.15; // "adjacent" margin added around the viewport, as a fraction of the
@@ -1180,8 +1180,9 @@ function activeFineTileTargets(perturbKey){
 
 // candidate seed points on a regular grid within one tile, each tagged with
 // the mip LEVEL it first appears at: a coarse spacing-4 subset (level 0),
-// the spacing-2 points that fill in around it (level 1), and everything else
-// down to spacing-1 (level 2) — a classic mipmap-style progressive reveal,
+// the spacing-2 points that fill in around it (level 1), and a checkerboard
+// of the remaining spacing-1 cells (level 2 — only half of them, so the
+// deepest zoom stays readable rather than crowded) — a mipmap-style progressive reveal,
 // so zooming in shows "a few lines, then more, then more" rather than the
 // whole tile's density popping in at once.
 function fineTileCandidates(tileBounds){
@@ -1190,7 +1191,8 @@ function fineTileCandidates(tileBounds){
   const out=[];
   for(let cx=0;cx<FLOW_FINE_GRID_PER_TILE;cx++){
     for(let cy=0;cy<FLOW_FINE_GRID_PER_TILE;cy++){
-      const level = (cx%4===0 && cy%4===0) ? 0 : (cx%2===0 && cy%2===0) ? 1 : 2;
+      const level = (cx%4===0 && cy%4===0) ? 0 : (cx%2===0 && cy%2===0) ? 1 : ((cx+cy)%2===0) ? 2 : -1;
+      if(level<0) continue;
       out.push({x:txmin+(cx+0.5)*cellW, y:tymin+(cy+0.5)*cellH, level});
     }
   }
