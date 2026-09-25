@@ -266,7 +266,7 @@ async function commit(){ // recompute current-schedule forecast (throttled)
       body:JSON.stringify({pid:S.pid, sample_id:smp.sample_id, horizon:S.horizon, schedule:S.schedule})});
   }catch(e){ console.error(e); }
   _inflight=false; busy(false);
-  renderAll();
+  buildLegend(); renderAll();
   if(_dirty){ _dirty=false; commit(); }
 }
 let _busyN=0;
@@ -378,14 +378,13 @@ function buildLegend(){
     d.innerHTML=`<span class="sw" style="background:${taxaColor(t)}"></span>${t}`;
     lg.appendChild(d);
   });
-  // the dashed baseline trace and the risk-mean overlay only appear in the
-  // predicted (trajectory) view
-  const d2=document.createElement('span'); d2.className='leg';
-  d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
-  lg.appendChild(d2);
-  const d3=document.createElement('span'); d3.className='leg';
-  d3.innerHTML=`<span class="sw" style="background:var(--tx-entero);width:12px;height:3px;border-radius:2px"></span>Enterococcus BSI risk (${enteroRiskWindowDays()}d mean)`;
-  lg.appendChild(d3);
+  // the dashed actual-regimen trace is only drawn (and keyed) once the user's
+  // regimen differs from the actual one
+  if(regimenModified()){
+    const d2=document.createElement('span'); d2.className='leg';
+    d2.innerHTML=`<span class="sw" style="background:transparent;border-top:1.5px dashed var(--ink2);width:12px;height:0"></span>actual-regimen Entero`;
+    lg.appendChild(d2);
+  }
   appendBsiLegend(lg);
 }
 
@@ -490,7 +489,7 @@ function drawPredicted(g, y){
       'stroke-width':0.45, 'shape-rendering':'geometricPrecision', 'data-taxa':taxa[ti], 'data-idx':ti}));
     cum=upper;
   }
-  if(S.baseFc){
+  if(S.baseFc && regimenModified()){
     const be=enteroBand(S.baseFc), bd=S.baseFc.day;
     g.appendChild(el('path',{class:'baseline-trace',
       d:'M'+bd.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(be[i]).toFixed(1)}`).join('L')}));
@@ -498,42 +497,19 @@ function drawPredicted(g, y){
   const e=enteroBand(S.fc);
   g.appendChild(el('path',{class:'entero-outline',
     d:'M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(e[i]).toFixed(1)}`).join('L')}));
-  drawEnteroRiskLine(g, y, days);
 }
 
-// Enterococcus BSI risk overlay: a bold, highlighted dark-green line tracking
-// the TRAILING mean predicted Enterococcus fraction over a W-day window
-// (W = the model's own risk_window, the same 21 d used to define "dominated"),
-// anchored so the window never reaches before the start of the prediction
-// (day t0) — it widens from a same-day value up to a full W-day trailing
-// window as the forecast advances. Time-weighted (trapezoidal) so the fixed
-// half-day forecast grid doesn't bias the average. Drawn with a halo so it
-// reads clearly even where it crosses the (similarly dark-green) Enterococcus
-// band itself.
-function enteroRiskWindowDays(){ return (S.meta && S.meta.risk_window) || 21; }
-function enteroRollingRisk(days, e){
-  const W=enteroRiskWindowDays(), out=new Array(days.length);
-  let lo=0;
-  for(let i=0;i<days.length;i++){
-    const dHi=days[i], dLo=Math.max(S.t0, dHi-W);
-    while(lo<i && days[lo+1]<=dLo+1e-9) lo++;
-    let sum=0, span=0;
-    for(let k=lo;k<i;k++){
-      const d0=Math.max(days[k],dLo), d1=days[k+1];
-      if(d1<=d0) continue;
-      const v0=interp(days,e,d0);
-      sum+=(v0+e[k+1])/2*(d1-d0); span+=(d1-d0);
-    }
-    out[i]= span>1e-9 ? sum/span : e[i];
-  }
-  return out;
+// true when the user-edited regimen differs from the patient's actual one
+// (compared as merged per-class intervals, so equivalent edits count as unchanged)
+function normSchedule(sc){
+  const out={};
+  Object.keys(sc||{}).sort().forEach(cat=>{
+    const ivs=(sc[cat]||[]).filter(iv=>iv[1]>iv[0]);
+    if(ivs.length) out[cat]=mergeIv(ivs).map(([s,e])=>[+s.toFixed(3), +e.toFixed(3)]);
+  });
+  return JSON.stringify(out);
 }
-function drawEnteroRiskLine(g, y, days){
-  const risk=enteroRollingRisk(days, S.fc.entero);
-  const d='M'+days.map((dd,i)=>`${xDay(dd).toFixed(1)},${y(risk[i]).toFixed(1)}`).join('L');
-  g.appendChild(el('path',{class:'entero-risk-halo', d}));
-  g.appendChild(el('path',{class:'entero-risk-line', d}));
-}
+function regimenModified(){ return normSchedule(S.schedule)!==normSchedule(S.baseSchedule); }
 
 // observed view: measured 16S composition as 1-day-thick stacked bars at each sample day
 function drawObservedBars(g, y){
@@ -2078,7 +2054,7 @@ function tutorialSteps(){
     { target:'#sampleCtl', title:'16S sample', body:
       `The forecast starts from whichever real stool sample is selected here.` },
     { target:'#trajPanel', title:'Predicted microbiome composition', body:
-      `The glowing green line tracks the ${enteroRiskWindowDays()}-day trailing mean of predicted Enterococcus abundance, the model's bloodstream-infection risk signal.` },
+      `The stacked bands show the model's predicted genus-level composition over time, with Enterococcus pinned to the bottom.` },
     { target:'#obsPanel', title:'Observed microbiome composition', body:
       `These are the patient's actual measured 16S samples, on the same day axis as the forecast.` },
     { target:'#abxPanel', title:'Antibiotic timeline', body:

@@ -193,14 +193,8 @@ text{fill:var(--muted);font-size:10.5px}
 #compSvg,#obsSvg{cursor:ew-resize}
 .entero-outline{fill:none;stroke:var(--ink);stroke-width:1.4;opacity:.75}
 .baseline-trace{fill:none;stroke:var(--ink2);stroke-width:2;stroke-dasharray:7 5;stroke-linecap:butt;opacity:.95;shape-rendering:crispEdges}
-/* Enterococcus BSI risk line: a bold, glowing dark-green trailing-mean trace,
-   with a light halo underneath so it stays legible crossing the (similarly
-   dark-green) Enterococcus band it's summarizing */
-.entero-risk-halo{fill:none;stroke:var(--surface-1);stroke-width:5.5;stroke-linejoin:round;opacity:.85}
-.entero-risk-line{fill:none;stroke:var(--tx-entero);stroke-width:2.6;stroke-linejoin:round;
-  filter:drop-shadow(0 0 3px var(--tx-entero))}
 /* overlays never intercept hover — the taxa tooltip should read the band underneath */
-.entero-outline,.baseline-trace,.entero-risk-halo,.entero-risk-line,
+.entero-outline,.baseline-trace,
 .readout-line,.readout-handle,.axis-tick,.axis-base,.thr-line{pointer-events:none}
 #compSvg text{pointer-events:none}
 .gut-ylabel{fill:var(--ink2);font-size:11px}
